@@ -166,7 +166,19 @@ def metadata_filename(
     year = str(meta.get("year") or "unknown")
     title = meta.get("title") or fallback or "paper"
     first_author = meta.get("first_author") or "unknown"
-    return clean_filename(f"{year}_{first_author}_{title}") + ".pdf"
+    suffix = ".pdf"
+    stem = clean_filename(
+        f"{year}_{first_author}_{title}", max_len=store.MAX_FILENAME_BYTES
+    )
+    available = store.MAX_FILENAME_BYTES - len(suffix.encode("utf-8"))
+    if len(stem.encode("utf-8")) > available:
+        stem = (
+            stem.encode("utf-8")[:available]
+            .decode("utf-8", "ignore")
+            .rstrip("._")
+            or "paper"
+        )
+    return stem + suffix
 
 
 def _merge_metadata(preferred: dict | None, fallback: dict | None) -> dict:
@@ -861,6 +873,7 @@ def parse_batch(path: Path) -> list[dict]:
 def write_reports(results: list[dict], out_dir: Path) -> None:
     store.atomic_write_json(out_dir / "oa_fetch_results.json", results)
     fields = ["success", "source", "file", "pdf_url", "doi", "title",
+              "expected_title",
               "year", "first_author",
               "source_id", "error", "institutional_error", "status",
               "canonical_id", "input_id", "duplicate_of", "pending_reason",
@@ -878,6 +891,7 @@ def write_reports(results: list[dict], out_dir: Path) -> None:
                 "pdf_url": result.get("pdf_url"),
                 "doi": meta.get("doi"),
                 "title": meta.get("title"),
+                "expected_title": meta.get("expected_title"),
                 "year": meta.get("year"),
                 "first_author": meta.get("first_author"),
                 "source_id": meta.get("source_id"),
@@ -1379,6 +1393,7 @@ def main() -> int:
                         "pdf_url": inst_result.get("pdf_url"),
                         "file": inst_result.get("file"),
                         "error": None,
+                        "pending_reason": None,
                     })
                 elif error == "institutional_cap_reached":
                     prev.update(status="pending", pending_reason=error)

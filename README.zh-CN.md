@@ -112,7 +112,7 @@ python3 oa_fetch.py \
 2018_Devlin_BERT_Pre-training_of_Deep_Bidirectional_Transformers_for_Language_Understanding_8a24a8c5.pdf
 ```
 
-书目信息只取自可核验来源：arXiv URL 会按 arXiv ID 查询 Atom 元数据；IEEE Xplore、ScienceDirect 和 Wiley 下载会读取当前文章页的 `citation_title`、`citation_author`、`citation_publication_date` 和 `citation_doi`。任务已有用户原始标题或由 DOI 锚定的预期标题时，页面必须提供 `citation_title`，且两者规范化后必须一致或相似度达到 `0.93`。页面缺少标题时返回 `publisher_title_unverifiable`，标题不一致时返回 `publisher_title_mismatch`；两种情况都不会请求 PDF。对于没有预期标题、仅由显式 DOI 或 URL 锚定的任务，citation 标签缺失本身不会阻止下载，文件名会依次退化到已知标题、arXiv ID、DOI、PII、IEEE 文档号或 URL basename。
+书目信息只取自可核验来源：arXiv URL 会按 arXiv ID 查询 Atom 元数据；IEEE Xplore、ScienceDirect 和 Wiley 下载会读取当前文章页的 `citation_title`、`citation_author`、`citation_publication_date` 和 `citation_doi`。任务已有用户原始标题或由 DOI 锚定的预期标题时，页面必须提供可用的 `citation_title`，且两者规范化后必须一致或相似度达到 `0.93`。页面缺少标题或标题规范化后为空时返回 `publisher_title_unverifiable`，标题不一致时返回 `publisher_title_mismatch`；两种情况都不会请求 PDF，被拒绝的页面标题只保留在 `citation_title`，`title` 继续保留任务预期标题。对于没有预期标题、仅由显式 DOI 或 URL 锚定的任务，citation 标签缺失本身不会阻止下载，文件名会依次退化到已知标题、arXiv ID、DOI、PII、IEEE 文档号或 URL basename。
 
 文件名末尾的哈希来自 canonical identity，同一篇论文跨运行保持稳定，不同论文即使同名也不会互相覆盖。目标名称已经被另一个文件占用时，程序保留现有 PDF 并报告 `filename_error`，不会覆盖任何一方。
 
@@ -159,7 +159,7 @@ python3 oa_fetch.py \
   --format text
 ```
 
-正常批量运行会自动在输出目录写入 `oa_fetch_manifest.csv`。该文件保留规范化后的唯一可执行输入，可用于再次运行和断点续跑；解析出的 DOI 和候选证据写在结果与状态中，不会冒充用户原始输入回填清单。
+正常批量运行会自动在输出目录写入 `oa_fetch_manifest.csv`。该文件保留规范化后的唯一可执行输入，可用于再次运行和断点续跑。输入记录原本没有标题时，工具从已锚定 DOI、arXiv ID 或受支持出版商页面获得的来源标题可以补入清单中的空标题字段，供后续恢复和准确命名使用；解析出的 DOI 和候选证据仍只写入结果与状态，不会冒充用户原始输入回填清单。
 
 只做离线规范化和去重，不发起标题查询或 PDF 下载：
 
@@ -347,7 +347,7 @@ stdout 始终输出一个 JSON payload；`--format text` 只向 stderr 增加进
 - `*.pdf`：优先采用“年份_第一作者_标题”，并带 canonical identity 哈希后缀的论文；
 - `oa_fetch_manifest.csv`：规范化、去重后的可执行清单；
 - `oa_fetch_results.json`：完整元数据、标题候选、解析决策、下载尝试和机构结果；
-- `oa_fetch_results.csv`：便于筛选的扁平摘要，包括 `title_resolution_status`、`title_resolution_reason`、`resolved_doi`、`citation_title`、`publisher_title_match` 和 `publisher_title_score`；
+- `oa_fetch_results.csv`：便于筛选的扁平摘要，包括 `title_resolution_status`、`title_resolution_reason`、`resolved_doi`、`expected_title`、`citation_title`、`publisher_title_match` 和 `publisher_title_score`；
 - `oa_fetch_state.json`：跨运行恢复状态和尝试历史；
 - `oa_fetch_pending.csv`：仅在需要显式继续时生成。
 
@@ -407,7 +407,7 @@ stdout 始终输出一个 JSON payload；`--format text` 只向 stderr 增加进
 - 机构访问只支持 IEEE Xplore、Wiley Online Library 和 Elsevier ScienceDirect。
 - 普通文章网页不会通用解析；`--url` 可靠支持的是含 DOI 的 URL、arXiv URL 和直接 PDF URL。
 - 仅标题输入依赖在线 arXiv、Crossref 和 OpenAlex 元数据；网络不可用、标题不完整或候选冲突时不会进入机构访问，需要补充 DOI 或受支持 URL。
-- 任务已有预期标题但出版商页面缺少 `citation_title` 时，记录保持为 `pending/publisher_title_unverifiable`；没有预期标题、仅由显式 DOI 或 URL 锚定的任务仍可使用该身份及文件名回退字段。
+- 任务已有预期标题但出版商页面缺少可用的 `citation_title` 时，记录保持为 `pending/publisher_title_unverifiable`；没有预期标题、仅由显式 DOI 或 URL 锚定的任务仍可使用该身份及文件名回退字段。
 - 标题疑似重复只做规范化后的精确匹配，不做模糊自动合并。
 - 出版商页面和登录策略可能变化；遇到登录墙时需要用户在可见浏览器中刷新会话。
 - 程序不能附着到已经打开的 Chrome，也不会保存学校账号和密码。

@@ -113,7 +113,7 @@ For example:
 2018_Devlin_BERT_Pre-training_of_Deep_Bidirectional_Transformers_for_Language_Understanding_8a24a8c5.pdf
 ```
 
-Bibliographic fields come only from verifiable sources. An arXiv URL is resolved through arXiv Atom metadata. IEEE Xplore, ScienceDirect, and Wiley article pages are read for `citation_title`, `citation_author`, `citation_publication_date`, and `citation_doi`. If the task has an original user title or a DOI-anchored expected title, the page must expose `citation_title`, and the normalized titles must be exact or score at least `0.93`. A missing title returns `publisher_title_unverifiable`; a disagreement returns `publisher_title_mismatch`. In both cases the PDF is not requested. For an explicit DOI or URL task with no expected title, missing citation tags alone do not block the download; filenames fall back to the known title, arXiv ID, DOI, PII, IEEE document number, or URL basename.
+Bibliographic fields come only from verifiable sources. An arXiv URL is resolved through arXiv Atom metadata. IEEE Xplore, ScienceDirect, and Wiley article pages are read for `citation_title`, `citation_author`, `citation_publication_date`, and `citation_doi`. If the task has an original user title or a DOI-anchored expected title, the page must expose a usable `citation_title`, and the normalized titles must be exact or score at least `0.93`. A missing or normalization-empty title returns `publisher_title_unverifiable`; a disagreement returns `publisher_title_mismatch`. In both cases the PDF is not requested, the rejected page title stays only in `citation_title`, and the expected title remains in `title`. For an explicit DOI or URL task with no expected title, missing citation tags alone do not block the download; filenames fall back to the known title, arXiv ID, DOI, PII, IEEE document number, or URL basename.
 
 The suffix is derived from canonical identity, so a paper keeps a stable name across runs and different papers with the same title do not overwrite each other. If another file already occupies the target name, the existing PDF is preserved and the result reports `filename_error`.
 
@@ -158,7 +158,7 @@ python3 oa_fetch.py \
   --format text
 ```
 
-A normal batch writes `oa_fetch_manifest.csv` to the output directory. It contains normalized, unique executable inputs for resume. Resolved DOI values and candidate evidence stay in the result and state files rather than being written back as if the user supplied them.
+A normal batch writes `oa_fetch_manifest.csv` to the output directory. It contains normalized, unique executable inputs for resume. When an input row has no title, a source-derived bibliographic title obtained for its anchored DOI, arXiv ID, or allowed publisher page may populate that empty manifest field for later resume and accurate naming. Resolved DOI values and candidate evidence stay in the result and state files rather than being written back as if the user supplied them.
 
 Perform an offline normalization and deduplication preflight without title queries or PDF downloads:
 
@@ -344,7 +344,7 @@ The output directory may contain:
 - `*.pdf` — collision-safe PDFs named from verified year, first author, and title when available;
 - `oa_fetch_manifest.csv` — normalized, deduplicated executable inputs;
 - `oa_fetch_results.json` — complete metadata, title candidates, resolution decisions, download attempts, and institutional results;
-- `oa_fetch_results.csv` — a flat summary including `title_resolution_status`, `title_resolution_reason`, `resolved_doi`, `citation_title`, `publisher_title_match`, and `publisher_title_score`;
+- `oa_fetch_results.csv` — a flat summary including `title_resolution_status`, `title_resolution_reason`, `resolved_doi`, `expected_title`, `citation_title`, `publisher_title_match`, and `publisher_title_score`;
 - `oa_fetch_state.json` — cross-run state and attempt history;
 - `oa_fetch_pending.csv` — written only when explicit continuation is required.
 
@@ -404,7 +404,7 @@ Run `python3 oa_fetch.py --help` for the current parser output.
 - Institutional access supports only IEEE Xplore, Wiley Online Library, and Elsevier ScienceDirect.
 - General article-page parsing is not implemented. `--url` reliably supports DOI-bearing URLs, arXiv URLs, and direct PDF URLs.
 - Title-only input depends on live arXiv, Crossref, and OpenAlex metadata. A network failure, incomplete title, or candidate conflict requires a DOI or supported URL.
-- If an expected title exists but the publisher page omits `citation_title`, the item remains `pending/publisher_title_unverifiable`. An explicit DOI or URL task without an expected title may still use its anchored identity and fallback filename fields.
+- If an expected title exists but the publisher page omits a usable `citation_title`, the item remains `pending/publisher_title_unverifiable`. An explicit DOI or URL task without an expected title may still use its anchored identity and fallback filename fields.
 - Possible title duplicates use normalized exact matching only; they are not merged fuzzily.
 - Publisher pages and login policies may change. A visible session refresh may be required.
 - The program cannot attach to an already-open Chrome process and never stores school usernames or passwords.

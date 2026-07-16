@@ -109,9 +109,10 @@ class OaFirstTests(unittest.TestCase):
             ]
             failure = {
                 "success": False,
-                "status": "failed",
+                "status": "pending",
+                "pending_reason": "title_resolution_ambiguous",
                 "meta": {"doi": "10.1109/example"},
-                "error": "no_open_access_pdf_downloaded",
+                "error": "title_resolution_ambiguous",
             }
             stdout = StringIO()
             with (
@@ -140,6 +141,7 @@ class OaFirstTests(unittest.TestCase):
         self.assertTrue(final_path.name.startswith("2025_Zhang_An_Accurate_IEEE_Paper_Title"))
         self.assertTrue(final_exists)
         self.assertEqual(result["meta"]["title"], page_meta["title"])
+        self.assertIsNone(result.get("pending_reason"))
         self.assertEqual(state["records"]["doi:10.1109/example"]["file"], expected_name)
 
     def test_publisher_title_mismatch_is_pending_for_manual_resolution(self):

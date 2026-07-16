@@ -25,7 +25,8 @@ class TitleResolutionTests(unittest.TestCase):
             },
             "meta": {
                 "doi": "10.1109/example",
-                "title": "Publisher title",
+                "title": "Expected title",
+                "expected_title": "Expected title",
                 "citation_title": "Publisher title",
                 "publisher_title_match": False,
                 "publisher_title_score": 0.2,
@@ -40,6 +41,7 @@ class TitleResolutionTests(unittest.TestCase):
         self.assertEqual(row["title_resolution_status"], "confirmed")
         self.assertEqual(row["title_resolution_reason"], "exact_title")
         self.assertEqual(row["resolved_doi"], "10.1109/example")
+        self.assertEqual(row["expected_title"], "Expected title")
         self.assertEqual(row["citation_title"], "Publisher title")
         self.assertEqual(row["publisher_title_match"], "False")
         self.assertEqual(row["publisher_title_score"], "0.2")

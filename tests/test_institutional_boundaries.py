@@ -245,11 +245,12 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         download.assert_not_called()
         self.assertEqual(results[0]["error"], "publisher_title_mismatch")
         self.assertFalse(results[0]["meta"]["publisher_title_match"])
+        self.assertEqual(results[0]["meta"]["title"], "Expected Paper Title")
         self.assertEqual(
             results[0]["meta"]["citation_title"], "Different Publisher Paper"
         )
 
-    def test_missing_publisher_title_stops_when_expected_title_is_known(self):
+    def test_unusable_publisher_title_stops_when_expected_title_is_known(self):
         class PlaywrightManager:
             def __enter__(self):
                 return object()
@@ -260,6 +261,9 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         class Page:
             url = "https://ieeexplore.ieee.org/document/123"
 
+            def __init__(self, citation_title):
+                self.citation_title = citation_title
+
             def goto(self, *args, **kwargs):
                 return None
 
@@ -267,6 +271,8 @@ class InstitutionalBoundaryTests(unittest.TestCase):
                 return None
 
             def get_attribute(self, selector, attribute, timeout):
+                if selector == 'meta[name="citation_title"]':
+                    return self.citation_title
                 if selector == 'meta[name="citation_doi"]':
                     return "10.1109/example"
                 return None
@@ -275,51 +281,61 @@ class InstitutionalBoundaryTests(unittest.TestCase):
                 return None
 
         class Context:
+            def __init__(self, citation_title):
+                self.citation_title = citation_title
+
             def new_page(self):
-                return Page()
+                return Page(self.citation_title)
 
             def close(self):
                 return None
 
-        with TemporaryDirectory() as tmp:
-            item = {
-                "idx": 0,
-                "id": "ref-1",
-                "doi": "10.1109/example",
-                "title": "Expected Paper Title",
-                "expected_title": "Expected Paper Title",
-                "dest": str(Path(tmp) / "paper.pdf"),
-            }
+        for citation_title in (None, "!!!"):
             with (
-                mock.patch.object(
-                    institutional_fetch,
-                    "_load_playwright",
-                    return_value=lambda: PlaywrightManager(),
-                ),
-                mock.patch.object(
-                    institutional_fetch, "_launch", return_value=Context()
-                ),
-                mock.patch.object(
-                    institutional_fetch, "_pdf_url_from_page"
-                ) as pdf_url,
-                mock.patch.object(institutional_fetch, "_download") as download,
-                redirect_stdout(StringIO()),
+                self.subTest(citation_title=citation_title),
+                TemporaryDirectory() as tmp,
             ):
-                results = institutional_fetch.fetch_batch(
-                    [item],
-                    profile_dir=str(Path(tmp) / "profile"),
-                    delay=4,
-                    jitter=0,
-                )
+                item = {
+                    "idx": 0,
+                    "id": "ref-1",
+                    "doi": "10.1109/example",
+                    "title": "Expected Paper Title",
+                    "expected_title": "Expected Paper Title",
+                    "dest": str(Path(tmp) / "paper.pdf"),
+                }
+                with (
+                    mock.patch.object(
+                        institutional_fetch,
+                        "_load_playwright",
+                        return_value=lambda: PlaywrightManager(),
+                    ),
+                    mock.patch.object(
+                        institutional_fetch,
+                        "_launch",
+                        return_value=Context(citation_title),
+                    ),
+                    mock.patch.object(
+                        institutional_fetch, "_pdf_url_from_page"
+                    ) as pdf_url,
+                    mock.patch.object(institutional_fetch, "_download") as download,
+                    redirect_stdout(StringIO()),
+                ):
+                    results = institutional_fetch.fetch_batch(
+                        [item],
+                        profile_dir=str(Path(tmp) / "profile"),
+                        delay=4,
+                        jitter=0,
+                    )
 
-        pdf_url.assert_not_called()
-        download.assert_not_called()
-        self.assertEqual(results[0]["error"], "publisher_title_unverifiable")
-        self.assertEqual(
-            results[0]["meta"]["expected_title"], "Expected Paper Title"
-        )
-        self.assertNotIn("citation_title", results[0]["meta"])
-        self.assertIsNone(results[0]["meta"]["publisher_title_match"])
+                pdf_url.assert_not_called()
+                download.assert_not_called()
+                self.assertEqual(
+                    results[0]["error"], "publisher_title_unverifiable"
+                )
+                self.assertEqual(
+                    results[0]["meta"]["expected_title"], "Expected Paper Title"
+                )
+                self.assertIsNone(results[0]["meta"]["publisher_title_match"])
 
     def test_explicit_doi_without_expected_title_skips_publisher_title_guard(self):
         class PlaywrightManager:

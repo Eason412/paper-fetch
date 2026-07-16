@@ -35,6 +35,15 @@ ARXIV_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 
 class FilenameMetadataTests(unittest.TestCase):
+    def test_noncanonical_metadata_filename_respects_utf8_byte_limit(self):
+        filename = oa_fetch.metadata_filename(
+            {"year": 2026, "first_author": "张", "title": "论文" * 200},
+            "paper",
+        )
+
+        self.assertTrue(filename.endswith(".pdf"))
+        self.assertLessEqual(len(filename.encode("utf-8")), store.MAX_FILENAME_BYTES)
+
     def test_arxiv_id_extraction_covers_urls_versions_legacy_and_doi(self):
         cases = {
             "https://arxiv.org/abs/1810.04805": "1810.04805",

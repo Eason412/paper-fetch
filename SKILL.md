@@ -69,6 +69,10 @@ read from an attachment:
 4. Run the temporary CSV with `--batch`. The backend normalizes DOI/URL values,
    removes hard DOI/URL duplicates, flags possible title-only duplicates, and
    writes the canonical `oa_fetch_manifest.csv` into the output directory.
+   A source-derived title obtained for an anchored DOI, arXiv ID, or allowed
+   publisher page may populate a previously empty manifest title for resume
+   and naming. Resolved DOI values and candidate evidence remain in
+   result/state files rather than being written back as user input.
 5. If a referenced paper has none of a source title, DOI, or URL, leave it out
    of the executable CSV, report the missing source information, and ask for
    the reference or attachment instead of inventing a row.
@@ -207,11 +211,13 @@ are known.
   first `citation_author`, publication date, and DOI before finalizing the
   filename.
 - When the task has an expected title from the user or DOI-anchored metadata,
-  require the publisher page to expose `citation_title` and require that title
-  to agree before requesting the PDF. Keep a missing title as
+  require the publisher page to expose a usable `citation_title` and require
+  that title to agree before requesting the PDF. Keep a missing or
+  normalization-empty title as
   `publisher_title_unverifiable` and a disagreement as
   `publisher_title_mismatch`; both remain pending and neither page is
-  downloaded.
+  downloaded. Preserve a rejected page title only as `citation_title`; do not
+  replace the task's expected `title` with it.
 - When no expected title is attached to an explicit DOI or URL task, missing
   bibliographic fields alone do not block the anchored identity. Use the most
   specific non-invented fallback: known title, arXiv ID, DOI, PII/IEEE document
@@ -265,7 +271,7 @@ When present, also report `renamed_from`, `filename_error`, and
 path before describing the migration as complete.
 
 Also report `title_resolution_status`, `title_resolution_reason`,
-`resolved_doi`, `citation_title`, `publisher_title_match`, and
+`resolved_doi`, `expected_title`, `citation_title`, `publisher_title_match`, and
 `publisher_title_score` when present. Candidate details remain in the JSON
 report even when the flat CSV contains only their summary.
 

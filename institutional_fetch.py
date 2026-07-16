@@ -254,12 +254,16 @@ def _citation_metadata(page, item: dict) -> dict:
     expected_title = item.get("expected_title")
     title_evidence = _publisher_title_evidence(expected_title, title)
 
-    # The publisher page is authoritative for bibliographic display fields.
+    # Keep a rejected publisher title as evidence without replacing the task's
+    # expected title. A matched title remains authoritative for file naming.
     if title:
-        meta["title"] = title
         meta["citation_title"] = title
+        if not expected_title or title_evidence["match"] is True:
+            meta["title"] = title
     if expected_title:
         meta["expected_title"] = expected_title
+        if title_evidence["match"] is not True:
+            meta["title"] = expected_title
     meta["publisher_title_match"] = title_evidence["match"]
     meta["publisher_title_score"] = title_evidence["score"]
     if author:
@@ -423,20 +427,22 @@ def fetch_batch(
                                         "error": "publisher_not_allowed"})
                     else:
                         page_base = {**base, "meta": _citation_metadata(page, item)}
+                        title_match = page_base["meta"].get(
+                            "publisher_title_match"
+                        )
                         if (
                             page_base["meta"].get("expected_title")
-                            and not page_base["meta"].get("citation_title")
+                            and title_match is not True
                         ):
+                            title_error = (
+                                "publisher_title_mismatch"
+                                if title_match is False
+                                else "publisher_title_unverifiable"
+                            )
                             results.append({
                                 **page_base,
                                 "success": False,
-                                "error": "publisher_title_unverifiable",
-                            })
-                        elif page_base["meta"].get("publisher_title_match") is False:
-                            results.append({
-                                **page_base,
-                                "success": False,
-                                "error": "publisher_title_mismatch",
+                                "error": title_error,
                             })
                         else:
                             resolved_doi = page_base["meta"].get("doi") or doi
