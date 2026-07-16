@@ -16,6 +16,10 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("ScienceDirect", text)
         self.assertIn("Never ask for, read, type, or store", text)
         self.assertIn("oa_fetch.py", text)
+        self.assertIn("~/Desktop/Papers", text)
+        self.assertIn("manifest", text.lower())
+        self.assertIn("Do not invent", text)
+        self.assertIn("pending", text.lower())
 
 
 if __name__ == "__main__":

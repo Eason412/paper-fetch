@@ -23,6 +23,8 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
+import store
+
 MAX_PDF_BYTES = 80 * 1024 * 1024
 MIN_INSTITUTIONAL_DELAY = 4.0
 MAX_INSTITUTIONAL_JITTER = 10.0
@@ -105,6 +107,18 @@ def _prepare_profile_dir(profile_dir: str) -> Path:
     except OSError:
         pass
     return path
+
+
+def profile_available(profile_dir: str | Path) -> bool:
+    """Return whether a persistent profile exists without reading its contents."""
+    path = Path(profile_dir).expanduser()
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except (StopIteration, OSError):
+        return False
+    return True
 
 
 def _quoted_doi(doi: str) -> str:
@@ -265,7 +279,7 @@ def _download(
     if len(body) > MAX_PDF_BYTES:
         return False, "too_large"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(body)
+    store.atomic_write_bytes(dest, body)
     return True, "downloaded"
 
 
@@ -305,17 +319,15 @@ def fetch_batch(
                 landing = f"https://doi.org/{_quoted_doi(doi)}" if doi else item.get("url")
                 dest = Path(item["dest"])
 
-                if dest.exists() and not overwrite:
+                if store.verify_pdf(dest) and not overwrite:
                     consecutive_blocks = 0
                     results.append({**base, "success": True, "source": "institutional",
                                     "file": str(dest), "pdf_url": None, "note": "exists"})
                     continue
                 if not landing:
-                    consecutive_blocks = 0
                     results.append({**base, "success": False, "error": "no_doi_or_url"})
                     continue
                 if not _allowed_landing_url(landing):
-                    consecutive_blocks = 0
                     results.append({**base, "success": False,
                                     "error": "publisher_not_allowed"})
                     continue
@@ -328,13 +340,11 @@ def fetch_batch(
                     page.wait_for_timeout(1500)
                     publisher = _publisher_from_url(page.url)
                     if not publisher:
-                        consecutive_blocks = 0
                         results.append({**base, "success": False,
                                         "error": "publisher_not_allowed"})
                     else:
                         pdf_url, pdf_error = _pdf_url_from_page(page, doi, publisher)
                         if not pdf_url:
-                            consecutive_blocks = 0
                             results.append({**base, "success": False,
                                             "error": pdf_error or "no_pdf_link_found"})
                         else:
@@ -354,15 +364,14 @@ def fetch_batch(
                                 results.append({**base, "success": False,
                                                 "pdf_url": pdf_url, "error": reason})
                 except Exception as exc:
-                    consecutive_blocks = 0
                     results.append({**base, "success": False,
                                     "error": f"{type(exc).__name__}"})
                 finally:
                     page.close()
 
                 if consecutive_blocks >= 3:
-                    print("[institutional] aborting: 3 consecutive blocks/login walls — "
-                          "check that you are still signed in.")
+                    print("[institutional] aborting: 3 blocks/login walls since the "
+                          "last successful PDF — check that you are still signed in.")
                     for remaining in capped[i:]:
                         results.append({
                             "meta": _meta(remaining),

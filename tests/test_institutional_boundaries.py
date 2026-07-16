@@ -269,6 +269,86 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         self.assertEqual(results[-1]["idx"], 30)
         self.assertEqual(results[-1]["error"], "institutional_cap_reached")
 
+    def test_non_successes_do_not_reset_the_block_streak(self):
+        class PlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class Page:
+            url = "https://ieeexplore.ieee.org/document/1"
+
+            def goto(self, *args, **kwargs):
+                return None
+
+            def wait_for_timeout(self, milliseconds):
+                return None
+
+            def close(self):
+                return None
+
+        class Context:
+            def new_page(self):
+                return Page()
+
+            def close(self):
+                return None
+
+        with TemporaryDirectory() as tmp:
+            items = [
+                {
+                    "idx": index,
+                    "doi": f"10.1109/{index}",
+                    "dest": str(Path(tmp) / f"paper-{index}.pdf"),
+                }
+                for index in range(5)
+            ]
+            pdf_results = [
+                ("https://ieeexplore.ieee.org/one.pdf", None),
+                (None, "no_pdf_link_found"),
+                ("https://ieeexplore.ieee.org/three.pdf", None),
+                ("https://ieeexplore.ieee.org/four.pdf", None),
+            ]
+            download_results = [
+                (False, "http_403"),
+                (False, "http_403"),
+                (False, "not_pdf_login_or_challenge"),
+            ]
+            with (
+                mock.patch.object(
+                    institutional_fetch,
+                    "_load_playwright",
+                    return_value=lambda: PlaywrightManager(),
+                ),
+                mock.patch.object(institutional_fetch, "_launch", return_value=Context()),
+                mock.patch.object(
+                    institutional_fetch,
+                    "_pdf_url_from_page",
+                    side_effect=pdf_results,
+                ),
+                mock.patch.object(
+                    institutional_fetch,
+                    "_download",
+                    side_effect=download_results,
+                ) as download,
+                mock.patch.object(institutional_fetch.time, "sleep"),
+                redirect_stdout(StringIO()),
+            ):
+                results = institutional_fetch.fetch_batch(
+                    items,
+                    profile_dir=str(Path(tmp) / "profile"),
+                    delay=4,
+                    jitter=0,
+                    max_items=30,
+                )
+
+        self.assertEqual(len(results), 5)
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(results[-1]["idx"], 4)
+        self.assertEqual(results[-1]["error"], "aborted_after_repeated_blocks")
+
 
 if __name__ == "__main__":
     unittest.main()

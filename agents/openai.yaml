@@ -1,0 +1,7 @@
+interface:
+  display_name: "OA Paper Fetch"
+  short_description: "批量获取开放论文并安全复用学校访问会话"
+  default_prompt: "使用 $oa-paper-fetch 将当前参考文献批量下载到默认目录，先尝试 OA，再按已保存偏好处理学校访问。"
+
+policy:
+  allow_implicit_invocation: true
