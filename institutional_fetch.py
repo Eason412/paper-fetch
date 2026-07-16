@@ -16,6 +16,8 @@ This is meant for filling in a handful of missing PDFs, not scraping.
 """
 from __future__ import annotations
 
+import difflib
+import html
 import math
 import random
 import re
@@ -27,6 +29,7 @@ import manifest as manifest_tools
 import store
 
 MAX_PDF_BYTES = 80 * 1024 * 1024
+PUBLISHER_TITLE_MIN_SCORE = 0.93
 MIN_INSTITUTIONAL_DELAY = 4.0
 MAX_INSTITUTIONAL_JITTER = 10.0
 MAX_INSTITUTIONAL_ITEMS = 30
@@ -224,18 +227,41 @@ def _first_author_family(name: str | None) -> str | None:
     return value.split()[-1] or None
 
 
+def _publisher_title_evidence(
+    expected_title: str | None, citation_title: str | None
+) -> dict:
+    if not expected_title or not citation_title:
+        return {"match": None, "score": None}
+    expected = manifest_tools.normalize_title(html.unescape(str(expected_title)))
+    citation = manifest_tools.normalize_title(html.unescape(str(citation_title)))
+    if not expected or not citation:
+        return {"match": None, "score": None}
+    score = difflib.SequenceMatcher(None, expected, citation).ratio()
+    return {
+        "match": expected == citation or score >= PUBLISHER_TITLE_MIN_SCORE,
+        "score": score,
+    }
+
+
 def _citation_metadata(page, item: dict) -> dict:
-    """Read publisher citation tags without making metadata a download gate."""
+    """Read publisher citation tags for identity checks and file naming."""
     meta = {key: value for key, value in _meta(item).items() if value not in (None, "")}
     title = _citation_value(page, "citation_title")
     author = _first_author_family(_citation_value(page, "citation_author"))
     date = _citation_value(page, "citation_publication_date", "citation_date")
     year_match = re.search(r"(?<!\d)(?:18|19|20|21)\d{2}(?!\d)", date or "")
     page_doi = manifest_tools.normalize_doi(_citation_value(page, "citation_doi"))
+    expected_title = item.get("expected_title")
+    title_evidence = _publisher_title_evidence(expected_title, title)
 
     # The publisher page is authoritative for bibliographic display fields.
     if title:
         meta["title"] = title
+        meta["citation_title"] = title
+    if expected_title:
+        meta["expected_title"] = expected_title
+    meta["publisher_title_match"] = title_evidence["match"]
+    meta["publisher_title_score"] = title_evidence["score"]
     if author:
         meta["first_author"] = author
     if year_match:
@@ -348,8 +374,8 @@ def fetch_batch(
 ) -> list[dict]:
     """Fetch entitled PDFs for `items` through the logged-in browser session.
 
-    Each item: {id, doi, title, year, first_author, url, dest, idx}. `dest` is
-    the provisional PDF path;
+    Each item: {id, doi, title, expected_title, year, first_author, url, dest,
+    idx}. `dest` is the provisional PDF path;
     `idx` (if present) is echoed back so callers can merge with prior results.
     """
     validate_institutional_options(delay, jitter, max_items)
@@ -397,29 +423,45 @@ def fetch_batch(
                                         "error": "publisher_not_allowed"})
                     else:
                         page_base = {**base, "meta": _citation_metadata(page, item)}
-                        resolved_doi = page_base["meta"].get("doi") or doi
-                        pdf_url, pdf_error = _pdf_url_from_page(
-                            page, resolved_doi, publisher
-                        )
-                        if not pdf_url:
-                            results.append({**page_base, "success": False,
-                                            "error": pdf_error or "no_pdf_link_found"})
+                        if (
+                            page_base["meta"].get("expected_title")
+                            and not page_base["meta"].get("citation_title")
+                        ):
+                            results.append({
+                                **page_base,
+                                "success": False,
+                                "error": "publisher_title_unverifiable",
+                            })
+                        elif page_base["meta"].get("publisher_title_match") is False:
+                            results.append({
+                                **page_base,
+                                "success": False,
+                                "error": "publisher_title_mismatch",
+                            })
                         else:
-                            ok, reason = _download(
-                                ctx, pdf_url, dest, timeout, publisher=publisher
+                            resolved_doi = page_base["meta"].get("doi") or doi
+                            pdf_url, pdf_error = _pdf_url_from_page(
+                                page, resolved_doi, publisher
                             )
-                            if ok:
-                                consecutive_blocks = 0
-                                results.append({**page_base, "success": True,
-                                                "source": "institutional",
-                                                "pdf_url": pdf_url, "file": str(dest)})
-                            else:
-                                if reason.startswith("http_4") or "challenge" in reason:
-                                    consecutive_blocks += 1
-                                else:
-                                    consecutive_blocks = 0
+                            if not pdf_url:
                                 results.append({**page_base, "success": False,
-                                                "pdf_url": pdf_url, "error": reason})
+                                                "error": pdf_error or "no_pdf_link_found"})
+                            else:
+                                ok, reason = _download(
+                                    ctx, pdf_url, dest, timeout, publisher=publisher
+                                )
+                                if ok:
+                                    consecutive_blocks = 0
+                                    results.append({**page_base, "success": True,
+                                                    "source": "institutional",
+                                                    "pdf_url": pdf_url, "file": str(dest)})
+                                else:
+                                    if reason.startswith("http_4") or "challenge" in reason:
+                                        consecutive_blocks += 1
+                                    else:
+                                        consecutive_blocks = 0
+                                    results.append({**page_base, "success": False,
+                                                    "pdf_url": pdf_url, "error": reason})
                 except Exception as exc:
                     results.append({**base, "success": False,
                                     "error": f"{type(exc).__name__}"})

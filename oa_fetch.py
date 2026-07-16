@@ -12,6 +12,7 @@ import argparse
 import copy
 import csv
 import difflib
+import html
 import ipaddress
 import json
 import os
@@ -29,13 +30,14 @@ import manifest as manifest_tools
 import store
 
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 MAX_PDF_BYTES = 80 * 1024 * 1024
 DEFAULT_TIMEOUT = 30
 DEFAULT_PROFILE_DIR = paper_config.DEFAULT_PROFILE_DIR
 UA = f"oa-paper-fetch/{VERSION} (+legal-open-access)"
 PDF_UA = UA
 CROSSREF_TITLE_MIN_SCORE = 0.62
+TITLE_CONFIRM_MIN_SCORE = 0.85
 
 DOI_RE = manifest_tools.DOI_RE
 ARXIV_ID_PATTERN = r"(?:\d{4}\.\d{4,5}|[a-z][a-z0-9.-]*/\d{7})(?:v\d+)?"
@@ -105,8 +107,16 @@ def normalize_title(text: str) -> str:
     return manifest_tools.normalize_title(text)
 
 
+def _comparison_title(text: str | None) -> str:
+    value = html.unescape(str(text or ""))
+    value = re.sub(r"<[^>]+>", " ", value)
+    return normalize_title(value)
+
+
 def title_score(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
+    return difflib.SequenceMatcher(
+        None, _comparison_title(a), _comparison_title(b)
+    ).ratio()
 
 
 def extract_doi(text: str | None) -> str | None:
@@ -215,7 +225,7 @@ def crossref_title_to_doi(title: str, timeout: int) -> dict | None:
             continue
         score = title_score(title, candidate_title)
         candidate = {
-            "doi": doi,
+            "doi": manifest_tools.normalize_doi(doi),
             "title": candidate_title,
             "score": score,
             "year": (((item.get("published-print") or item.get("published-online") or {}).get("date-parts") or [[None]])[0][0]),
@@ -343,6 +353,7 @@ def arxiv_title_lookup(title: str | None, timeout: int) -> dict:
 
 
 def openalex_lookup(doi: str | None, title: str | None, timeout: int) -> dict:
+    score = None
     if doi:
         encoded = urllib.parse.quote(f"https://doi.org/{doi}", safe="")
         url = f"https://api.openalex.org/works/{encoded}"
@@ -362,6 +373,7 @@ def openalex_lookup(doi: str | None, title: str | None, timeout: int) -> dict:
                 best = (score, item)
         if not best or best[0] < 0.55:
             return {}
+        score = best[0]
         data = best[1]
     authorships = data.get("authorships") or []
     first_author = None
@@ -378,11 +390,142 @@ def openalex_lookup(doi: str | None, title: str | None, timeout: int) -> dict:
     if oa_url and oa_url not in urls:
         urls.append(oa_url)
     return {
-        "doi": (data.get("doi") or "").replace("https://doi.org/", "") or doi,
+        "doi": manifest_tools.normalize_doi(data.get("doi")) or doi,
         "title": data.get("title") or title,
         "year": data.get("publication_year"),
         "first_author": first_author,
         "urls": urls,
+        "score": score,
+    }
+
+
+def _title_resolution_candidate(
+    source: str, found: dict | None, input_title: str
+) -> dict | None:
+    if not found:
+        return None
+    candidate_title = str(found.get("title") or "").strip()
+    doi = manifest_tools.normalize_doi(found.get("doi"))
+    raw_score = found.get("score")
+    try:
+        score = float(raw_score) if raw_score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    if score is None and candidate_title:
+        score = title_score(input_title, candidate_title)
+    return {
+        "source": source,
+        "doi": doi,
+        "title": candidate_title or None,
+        "score": score,
+        "year": found.get("year"),
+        "first_author": found.get("first_author"),
+        "urls": list(found.get("urls") or []),
+    }
+
+
+def _is_exact_arxiv_alias(candidate: dict, input_title: str) -> bool:
+    doi = str(candidate.get("doi") or "")
+    return (
+        candidate.get("source") == "arxiv_title"
+        and doi.startswith("10.48550/arxiv.")
+        and _comparison_title(candidate.get("title")) == _comparison_title(input_title)
+    )
+
+
+def resolve_title_identity(title: str, timeout: int) -> dict:
+    """Resolve a title to one DOI only when independent evidence is safe."""
+    lookups = (
+        ("arxiv_title", arxiv_title_lookup(title, timeout)),
+        ("crossref_title", crossref_title_to_doi(title, timeout)),
+        ("openalex_title", openalex_lookup(None, title, timeout)),
+    )
+    candidates = []
+    lookup_evidence = []
+    for source, found in lookups:
+        candidate = _title_resolution_candidate(source, found, title)
+        lookup_evidence.append({
+            "source": source,
+            "result": candidate is not None,
+            "score": candidate.get("score") if candidate else None,
+            "doi": candidate.get("doi") if candidate else None,
+            "title": candidate.get("title") if candidate else None,
+        })
+        if candidate:
+            candidates.append(candidate)
+
+    qualified: dict[str, list[dict]] = {}
+    for candidate in candidates:
+        candidate_doi = candidate.get("doi")
+        candidate_score = candidate.get("score")
+        if (
+            candidate_doi
+            and candidate_score is not None
+            and candidate_score >= TITLE_CONFIRM_MIN_SCORE
+        ):
+            qualified.setdefault(candidate_doi, []).append(candidate)
+
+    # An arXiv repository DOI and the later publisher DOI can identify the
+    # same exact-title work. Treat the arXiv DOI as an auditable alias only
+    # when at least two independent sources corroborate one publisher DOI.
+    # One source is not enough, and multiple publisher DOIs always conflict.
+    identity_qualified = qualified
+    accepted_alias_dois: list[str] = []
+    if len(qualified) > 1:
+        arxiv_aliases = {
+            candidate_doi: group
+            for candidate_doi, group in qualified.items()
+            if all(_is_exact_arxiv_alias(candidate, title) for candidate in group)
+        }
+        publisher_groups = {
+            candidate_doi: group
+            for candidate_doi, group in qualified.items()
+            if candidate_doi not in arxiv_aliases
+        }
+        if len(publisher_groups) == 1 and len(arxiv_aliases) == len(qualified) - 1:
+            publisher_group = next(iter(publisher_groups.values()))
+            if len({candidate["source"] for candidate in publisher_group}) >= 2:
+                identity_qualified = publisher_groups
+                accepted_alias_dois = sorted(arxiv_aliases)
+
+    status = "unresolved"
+    reason = "no_candidates"
+    selected_doi = None
+    selected = None
+    if len(identity_qualified) > 1:
+        status = "ambiguous"
+        reason = "conflicting_dois"
+    elif len(identity_qualified) == 1:
+        only_doi, group = next(iter(identity_qualified.items()))
+        exact = any(
+            _comparison_title(candidate.get("title")) == _comparison_title(title)
+            for candidate in group
+        )
+        independent_sources = {candidate["source"] for candidate in group}
+        if len(independent_sources) >= 2:
+            status = "confirmed"
+            reason = "exact_title" if exact else "multiple_sources_same_doi"
+        else:
+            status = "ambiguous"
+            reason = "insufficient_confirmation"
+        if status == "confirmed":
+            selected_doi = only_doi
+            selected = max(
+                group, key=lambda candidate: candidate.get("score") or 0.0
+            )
+    elif candidates:
+        status = "ambiguous"
+        reason = "insufficient_confirmation"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "input_title": title,
+        "selected_doi": selected_doi,
+        "accepted_alias_dois": accepted_alias_dois,
+        "selected": selected,
+        "candidates": candidates,
+        "lookups": lookup_evidence,
     }
 
 
@@ -485,6 +628,7 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
     sources = []
     meta: dict = {"title": title, "doi": doi, "source_id": item.get("id"), "url": original_url}
     candidates: list[tuple[str, str, dict]] = []
+    title_resolution = None
 
     for u in direct_candidates(original_url):
         candidates.append(("direct", u, {}))
@@ -514,22 +658,41 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
         title = title or meta.get("title") or ""
 
     if not arxiv_id and not doi and title:
-        ax = arxiv_title_lookup(title, timeout)
-        sources.append({"source": "arxiv_title", "result": bool(ax), "score": ax.get("score") if ax else None})
-        if ax:
-            for key in ("title", "year", "first_author", "doi"):
-                if ax.get(key) and not meta.get(key):
-                    meta[key] = ax[key]
-            for u in ax.get("urls") or []:
-                candidates.append(("arxiv_title", u, ax))
+        title_resolution = resolve_title_identity(title, timeout)
+        sources.extend(title_resolution.get("lookups") or [])
+        sources.append({
+            "source": "title_resolution",
+            "result": title_resolution.get("status") == "confirmed",
+            "status": title_resolution.get("status"),
+            "reason": title_resolution.get("reason"),
+            "selected_doi": title_resolution.get("selected_doi"),
+        })
+        if title_resolution.get("status") == "confirmed":
+            doi = title_resolution.get("selected_doi")
+            accepted_alias_dois = set(
+                title_resolution.get("accepted_alias_dois") or []
+            )
+            selected = title_resolution.get("selected") or {}
+            for key in ("title", "year", "first_author"):
+                if selected.get(key):
+                    meta[key] = selected[key]
+            meta["doi"] = doi
+            title = meta.get("title") or title
+            for found in title_resolution.get("candidates") or []:
+                if (
+                    found.get("doi") != doi
+                    and found.get("doi") not in accepted_alias_dois
+                ):
+                    continue
+                for url in found.get("urls") or []:
+                    candidates.append(
+                        (found.get("source") or "title_resolution", url, found)
+                    )
 
-        cr = crossref_title_to_doi(title, timeout)
-        sources.append({"source": "crossref_title", "result": bool(cr), "score": (cr or {}).get("score")})
-        if cr:
-            doi = cr.get("doi")
-            meta.update({k: v for k, v in cr.items() if k in {"title", "year", "first_author", "doi", "url"} and v})
-
-    if not arxiv_id:
+    title_resolution_blocked = bool(
+        title_resolution and title_resolution.get("status") != "confirmed"
+    )
+    if not arxiv_id and not title_resolution_blocked:
         for source_name, lookup in (
             ("openalex", lambda: openalex_lookup(doi, title, timeout)),
             ("unpaywall", lambda: unpaywall_lookup(doi, timeout) if doi else {}),
@@ -567,6 +730,32 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
         "target_file": str(dest),
     }
 
+    if title_resolution_blocked:
+        ambiguous = title_resolution.get("status") == "ambiguous"
+        error = (
+            "title_resolution_ambiguous"
+            if ambiguous
+            else "title_resolution_unresolved"
+        )
+        blocked = {
+            "success": False,
+            "status": "pending" if ambiguous else "failed",
+            "source": None,
+            "pdf_url": None,
+            "file": None,
+            "meta": meta,
+            "sources": sources,
+            "attempts": [],
+            "error": error,
+            "title_resolution": title_resolution,
+            **identity,
+        }
+        if ambiguous:
+            blocked["pending_reason"] = error
+        if dry_run:
+            blocked["dry_run"] = True
+        return blocked
+
     if dry_run:
         return {
             "success": bool(candidates),
@@ -578,6 +767,7 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
             "meta": meta,
             "sources": sources,
             "candidates": [{"source": s, "url": u} for s, u, _ in candidates],
+            "title_resolution": title_resolution,
             **identity,
         }
 
@@ -595,6 +785,7 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
                 "meta": meta,
                 "sources": sources,
                 "attempts": attempts,
+                "title_resolution": title_resolution,
                 **identity,
             }
         time.sleep(0.5)
@@ -609,6 +800,7 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
         "sources": sources,
         "attempts": attempts,
         "error": "no_open_access_pdf_downloaded",
+        "title_resolution": title_resolution,
         **identity,
     }
 
@@ -672,10 +864,13 @@ def write_reports(results: list[dict], out_dir: Path) -> None:
               "year", "first_author",
               "source_id", "error", "institutional_error", "status",
               "canonical_id", "input_id", "duplicate_of", "pending_reason",
+              "title_resolution_status", "title_resolution_reason", "resolved_doi",
+              "citation_title", "publisher_title_match", "publisher_title_score",
               "renamed_from", "filename_error", "filename_metadata_error"]
     rows = []
     for result in results:
         meta = result.get("meta") or {}
+        title_resolution = result.get("title_resolution") or {}
         rows.append({
                 "success": result.get("success"),
                 "source": result.get("source"),
@@ -693,6 +888,12 @@ def write_reports(results: list[dict], out_dir: Path) -> None:
                 "input_id": result.get("input_id") or meta.get("source_id"),
                 "duplicate_of": result.get("duplicate_of"),
                 "pending_reason": result.get("pending_reason"),
+                "title_resolution_status": title_resolution.get("status"),
+                "title_resolution_reason": title_resolution.get("reason"),
+                "resolved_doi": title_resolution.get("selected_doi"),
+                "citation_title": meta.get("citation_title"),
+                "publisher_title_match": meta.get("publisher_title_match"),
+                "publisher_title_score": meta.get("publisher_title_score"),
                 "renamed_from": result.get("renamed_from"),
                 "filename_error": result.get("filename_error"),
                 "filename_metadata_error": result.get("filename_metadata_error"),
@@ -1114,6 +1315,7 @@ def main() -> int:
                 "canonical_id": record.get("canonical_id"),
                 "doi": doi,
                 "title": title,
+                "expected_title": record.get("title"),
                 "year": meta.get("year"),
                 "first_author": meta.get("first_author"),
                 "url": url,
@@ -1182,6 +1384,11 @@ def main() -> int:
                     prev.update(status="pending", pending_reason=error)
                 elif error == "profile_missing_login_required":
                     prev.update(status="pending", pending_reason=error)
+                elif error in {
+                    "publisher_title_mismatch",
+                    "publisher_title_unverifiable",
+                }:
+                    prev.update(status="pending", pending_reason=error, error=error)
                 elif error in pending_login_errors or str(error or "").startswith("http_4"):
                     prev.update(status="pending", pending_reason="login_refresh_required")
                 else:

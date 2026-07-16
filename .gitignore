@@ -3,8 +3,13 @@ pdfs/
 *.pdf
 oa_fetch_results.json
 oa_fetch_results.csv
+oa_fetch_state.json
+oa_fetch_manifest.csv
+oa_fetch_pending.csv
+*.log
+.cache/
 
-# logged-in browser session (contains your authenticated cookies — never commit)
+# logged-in browser session (contains authenticated session data — never commit)
 profile/
 .oa-paper-fetch/
 

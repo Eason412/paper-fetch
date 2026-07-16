@@ -31,6 +31,9 @@ do not make them assemble CLI commands unless they request the commands.
   metadata, accept arXiv Atom records and citation tags on the allowed
   publisher article page as source material. Never infer year or author from
   a URL, journal name, or memory.
+- Treat title-only input as a request to resolve identity, not permission to
+  download the most similar result. Preserve the exact source title and let
+  the backend confirm a DOI or report ambiguity.
 
 ## Resolve paths
 
@@ -80,6 +83,31 @@ python3 "$SKILL_DIR/oa_fetch.py" \
 
 Report invalid and duplicate rows. Do not describe a normalized manifest as a
 completed download.
+
+## Resolve title-only references safely
+
+Allow a row to contain only its exact source title. The backend queries arXiv,
+Crossref, and OpenAlex for independent candidates before it uses a resolved
+DOI.
+
+- Accept one DOI automatically only when at least two independent sources
+  return the same DOI with strong title agreement. An exact title from only
+  one source remains insufficient; exact agreement changes the recorded
+  reason, not the independent-corroboration requirement.
+- Treat an exact-title `10.48550/arXiv.*` repository DOI as an alias of a
+  publisher DOI only when at least two independent sources corroborate that
+  one publisher DOI. Keep the arXiv OA URL and alias in the JSON evidence. One
+  publisher source is insufficient, and two publisher DOIs always conflict.
+- Treat lower similarity thresholds as candidate discovery only. Never select
+  a DOI merely because it is the highest-scoring result.
+- Preserve the candidate title, DOI, source, score, year, and first author in
+  the JSON evidence.
+- For `title_resolution_ambiguous`, keep the item pending and ask for a DOI,
+  publisher URL, or corrected full title. Do not download any candidate.
+- For `title_resolution_unresolved`, report failure and ask for a DOI,
+  publisher URL, or the exact original title.
+- An explicit DOI or supported URL remains the identity anchor. Metadata
+  searches must not silently replace it.
 
 ## Configure standing preferences
 
@@ -178,9 +206,16 @@ are known.
   let the institutional backend read the article page's `citation_title`,
   first `citation_author`, publication date, and DOI before finalizing the
   filename.
-- If those fields are unavailable, keep the download and use the most specific
-  non-invented fallback: known title, arXiv ID, DOI, PII/IEEE document ID, or
-  URL basename.
+- When the task has an expected title from the user or DOI-anchored metadata,
+  require the publisher page to expose `citation_title` and require that title
+  to agree before requesting the PDF. Keep a missing title as
+  `publisher_title_unverifiable` and a disagreement as
+  `publisher_title_mismatch`; both remain pending and neither page is
+  downloaded.
+- When no expected title is attached to an explicit DOI or URL task, missing
+  bibliographic fields alone do not block the anchored identity. Use the most
+  specific non-invented fallback: known title, arXiv ID, DOI, PII/IEEE document
+  ID, or URL basename.
 - Never overwrite a different file at the desired name. Report
   `filename_error` and retain the verified PDF at its existing name.
 - If the output filesystem does not support same-directory hard links, retain
@@ -209,6 +244,10 @@ When `oa_fetch_pending.csv` exists:
   the pending CSV as a new batch.
 - For `login_refresh_required` or `profile_missing_login_required`, ask the
   user to refresh the visible login. Resume only after they confirm completion.
+- For `title_resolution_ambiguous`, `publisher_title_mismatch`, or
+  `publisher_title_unverifiable`, report the available identity evidence and
+  wait for a corrected title, DOI, or supported article URL. Do not
+  automatically retry the same unverified identity.
 - Never start a second institutional batch automatically.
 - If one pending CSV contains both a login-refresh reason and
   `institutional_cap_reached`, the login refresh gates the whole resume. After
@@ -225,6 +264,11 @@ When present, also report `renamed_from`, `filename_error`, and
 `filename_metadata_error`. Verify that a renamed file exists at the reported
 path before describing the migration as complete.
 
+Also report `title_resolution_status`, `title_resolution_reason`,
+`resolved_doi`, `citation_title`, `publisher_title_match`, and
+`publisher_title_score` when present. Candidate details remain in the JSON
+report even when the flat CSV contains only their summary.
+
 The output directory contains:
 
 - accurately named, collision-safe PDF files;
@@ -240,6 +284,14 @@ a login refresh, or was deferred by the institutional cap.
 ## Stop conditions
 
 - `publisher_not_allowed`: leave it unresolved; do not expand the allowlist.
+- `title_resolution_ambiguous`: do not download; request a DOI, supported URL,
+  or corrected exact title.
+- `title_resolution_unresolved`: retain a failed result and request a DOI,
+  supported URL, or exact source title.
+- `publisher_title_mismatch`: do not request the PDF; retain a pending result
+  for manual identity resolution.
+- `publisher_title_unverifiable`: do not request the PDF; retain a pending
+  result because an expected title could not be checked on the publisher page.
 - `unsafe_pdf_url`: stop that item; do not download the URL manually.
 - `not_pdf_login_or_challenge`, `profile_missing_login_required`, or repeated
   HTTP 4xx/challenge responses: stop institutional work and request a visible

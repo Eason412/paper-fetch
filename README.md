@@ -1,24 +1,27 @@
 # oa-paper-fetch
 
-`oa-paper-fetch` 把 AI 整理出的参考文献清单转换成可恢复的 PDF 下载任务。用户可以给出 DOI、标题、URL、Markdown、CSV 或纯文本，也可以直接让 Codex 处理对话中刚刚推荐的多篇论文。Skill 会先规范化和去重，再优先下载开放获取（Open Access，OA）版本；只有用户明确启用学校访问后，才会复用由用户本人完成登录的浏览器会话，从 IEEE Xplore、Wiley Online Library 或 Elsevier ScienceDirect 获取用户有权访问的全文。
+[简体中文](README.zh-CN.md) | **English**
 
-未指定保存位置时，论文默认进入 `~/Desktop/Papers`。学校登录会话在有效期内可以跨运行复用；工具不会读取、输入或保存学校账号、密码、MFA 验证码和恢复码。
+`oa-paper-fetch` turns references found by an AI into resumable, auditable PDF download jobs. You can provide exact paper titles, DOI values, URLs, Markdown, CSV, or plain text. Codex and Claude Code invoke the same backend through their respective Skill entry points. The tool confirms paper identity, tries open-access (OA) copies first, and uses the user's authenticated institutional browser session for IEEE Xplore, Wiley Online Library, or Elsevier ScienceDirect only when institutional fallback is explicitly enabled.
 
-## 工作流程
+Papers go to `~/Desktop/Papers` unless another destination is configured. A valid institutional session can be reused across runs. The tool does not read, enter, or store school usernames, passwords, MFA codes, or recovery codes. The current CLI version is `0.5.0`.
 
-1. **整理清单。** Skill 把 AI 找到的参考文献原样写成 `id,title,doi,url` CSV，不猜测缺失的 DOI 或 URL。
-2. **规范化和去重。** 后端统一 DOI/URL 格式，优先按 DOI、其次按 URL 去重；标题相同但没有 DOI/URL 的记录只标记为疑似重复，不会静默合并。
-3. **优先获取 OA。** 依次尝试直接 PDF、arXiv、Crossref 标题解析、OpenAlex、Unpaywall 和 Semantic Scholar。
-4. **按需使用学校访问。** OA 未成功且具备 DOI 或原始 URL 的记录，可以进入已登录的 IEEE、Wiley 或 Elsevier 浏览器会话。
-5. **按书目信息准确命名。** 优先使用来源提供的年份、第一作者和完整标题；元数据不足时使用 arXiv ID、DOI、PII、IEEE 文档号或原始 URL 文件名，不再退化成只有 `rowN` 的名称。
-6. **保存状态并支持恢复。** PDF、规范化清单、详细报告和恢复状态都写入输出目录；再次运行同一清单时跳过已经验证的 PDF，只重试未完成项目。
-7. **安全分段。** 单次最多尝试 30 篇机构访问；超出的记录写入 `oa_fetch_pending.csv`，必须等用户再次要求后才能继续。
+## How it works
 
-## 快速开始
+1. **Build a manifest.** The Skill copies AI-found references into an `id,title,doi,url` CSV. If only the title is known, DOI and URL stay empty; the agent must not fill them from memory.
+2. **Normalize and deduplicate.** The backend normalizes DOI and URL values, deduplicates by DOI first and URL second, and only flags title-only duplicates instead of silently merging them.
+3. **Resolve title-only identity.** arXiv, Crossref, and OpenAlex are queried independently. A DOI is accepted only when at least two independent sources agree on the same DOI and each candidate title reaches the confirmation threshold. Even an exact title from only one source remains ambiguous, and the highest-scoring candidate is never accepted by ranking alone.
+4. **Try OA first.** Direct PDFs and confirmed arXiv, OpenAlex, Unpaywall, and Semantic Scholar candidates are attempted before institutional access.
+5. **Use institutional access when allowed.** An OA miss with a confirmed DOI or supported original URL can enter the logged-in IEEE, Wiley, or Elsevier flow. When the task has an expected title, the publisher's `citation_title` must match before a PDF is requested.
+6. **Name files from verified metadata.** Year, first author, and full title are preferred. When metadata is incomplete, the filename falls back to an arXiv ID, DOI, PII, IEEE document number, or original URL basename instead of a bare `rowN`.
+7. **Persist state and resume.** PDFs, the normalized manifest, detailed reports, and resume state are written to the output directory. A later run skips verified PDFs and retries only unresolved work.
+8. **Keep institutional batches bounded.** At most 30 institutional items are attempted in one run. Overflow is written to `oa_fetch_pending.csv` and requires another explicit user request.
 
-### 安装为 Codex Skill
+## Quick start
 
-安装到当前 Codex 用户级 Skill 目录：
+### Codex
+
+Install the repository in the current Codex user's Skill directory:
 
 ```bash
 SKILLS_HOME="${CODEX_HOME:-$HOME/.codex}/skills"
@@ -27,25 +30,66 @@ git clone https://github.com/Eason412/paper-fetch.git \
   "$SKILLS_HOME/oa-paper-fetch"
 ```
 
-如果已经安装，请在仓库目录执行 `git pull` 更新。Codex 通常会自动发现 Skill；如果没有出现，重启 Codex。
+Run `git pull` in the repository directory to update an existing installation. Restart Codex if it does not discover the Skill.
 
-安装后可以直接说：
-
-```text
-使用 $oa-paper-fetch，把你刚才推荐的所有参考文献下载下来。
-```
-
-没有指定目录时保存到 `~/Desktop/Papers`。也可以覆盖本次位置：
+Then ask:
 
 ```text
-使用 $oa-paper-fetch，把这些论文下载到 /absolute/path/to/papers。
+Use $oa-paper-fetch to download every reference you just recommended.
 ```
 
-`SKILL.md` 是主要操作入口；`oa_fetch.py` 和 `institutional_fetch.py` 是执行后端，通常不需要用户手工拼接命令。
+Without an explicit destination, the backend uses the saved preference or `~/Desktop/Papers`. To override it for one request:
 
-### 直接运行一篇 OA 论文
+```text
+Use $oa-paper-fetch to download these papers to /absolute/path/to/papers.
+```
 
-OA 层需要 Python 3.9 或更高版本，不依赖第三方 Python 包。在仓库根目录运行：
+### Claude Code
+
+Claude Code supports project Skills at `.claude/skills/<name>/SKILL.md`. Clone the repository, start Claude Code from its root, and use the included `.claude/skills/oa-paper-fetch/SKILL.md` wrapper:
+
+```bash
+git clone https://github.com/Eason412/paper-fetch.git
+cd paper-fetch
+claude
+```
+
+Invoke the Skill explicitly:
+
+```text
+/oa-paper-fetch Download the papers you just recommended to the default directory.
+```
+
+To make it available in every Claude Code project, install the complete repository in the personal Skill directory:
+
+```bash
+mkdir -p "$HOME/.claude/skills"
+git clone https://github.com/Eason412/paper-fetch.git \
+  "$HOME/.claude/skills/oa-paper-fetch"
+```
+
+Claude Code can select the Skill from its `description` or invoke it explicitly as `/oa-paper-fetch`. Restart the session if a newly created top-level Skill directory is not discovered. See the [official Claude Code Skills documentation](https://code.claude.com/docs/en/skills) for directory conventions.
+
+The root `SKILL.md` is the only operational contract shared by Codex and Claude Code. The Claude project Skill is a thin router; `oa_fetch.py` and `institutional_fetch.py` remain the shared backends.
+
+### Shortest path: exact titles only
+
+After installing either Skill, give the agent the exact source titles:
+
+```text
+Download the following papers to the Desktop. Try OA first and use my
+already-configured institutional access only when OA is unavailable:
+
+1. Exact Full Paper Title One
+2. Exact Full Paper Title Two
+3. Exact Full Paper Title Three
+```
+
+The agent creates a temporary batch manifest and runs the backend. If trusted sources return conflicting DOI values, the tool does not choose one. It preserves the candidate evidence and asks for a DOI, a supported article URL, or a corrected exact title.
+
+### Run one OA paper directly
+
+The OA layer requires Python 3.10 or newer and uses only the Python standard library. Run from the repository root:
 
 ```bash
 python3 oa_fetch.py \
@@ -53,48 +97,60 @@ python3 oa_fetch.py \
   --format text
 ```
 
-成功后，PDF 和报告位于 `~/Desktop/Papers`。如需启用 Unpaywall，在本机环境设置 `UNPAYWALL_EMAIL`；程序不会打印该变量的值。
+On success, the PDF and reports appear in `~/Desktop/Papers` unless another default is configured. To enable Unpaywall, set `UNPAYWALL_EMAIL` in the local environment; the backend does not print its value.
 
-## PDF 命名
+## PDF naming
 
-正常情况下，文件名采用：
+The normal filename shape is:
 
 ```text
-年份_第一作者_完整论文标题_8位稳定哈希.pdf
+YEAR_FIRST-AUTHOR_FULL-PAPER-TITLE_8-CHAR-STABLE-HASH.pdf
 ```
 
-例如：
+For example:
 
 ```text
 2018_Devlin_BERT_Pre-training_of_Deep_Bidirectional_Transformers_for_Language_Understanding_8a24a8c5.pdf
 ```
 
-书目信息只取自可核验来源：arXiv URL 会按 arXiv ID 查询 Atom 元数据；IEEE Xplore、ScienceDirect 和 Wiley 下载会读取当前文章页的 `citation_title`、`citation_author`、`citation_publication_date` 和 `citation_doi`。出版商页面缺少标签或暂时不可读时，下载不会因此失败，文件名会依次退化到已知标题、arXiv ID、DOI、PII、IEEE 文档号或 URL basename。
+Bibliographic fields come only from verifiable sources. An arXiv URL is resolved through arXiv Atom metadata. IEEE Xplore, ScienceDirect, and Wiley article pages are read for `citation_title`, `citation_author`, `citation_publication_date`, and `citation_doi`. If the task has an original user title or a DOI-anchored expected title, the page must expose `citation_title`, and the normalized titles must be exact or score at least `0.93`. A missing title returns `publisher_title_unverifiable`; a disagreement returns `publisher_title_mismatch`. In both cases the PDF is not requested. For an explicit DOI or URL task with no expected title, missing citation tags alone do not block the download; filenames fall back to the known title, arXiv ID, DOI, PII, IEEE document number, or URL basename.
 
-文件名末尾的哈希来自 canonical identity，同一篇论文跨运行保持稳定，不同论文即使同名也不会互相覆盖。目标名称已经被另一个文件占用时，程序保留现有 PDF 并报告 `filename_error`，不会覆盖任何一方。
+The suffix is derived from canonical identity, so a paper keeps a stable name across runs and different papers with the same title do not overwrite each other. If another file already occupies the target name, the existing PDF is preserved and the result reports `filename_error`.
 
-## AI 批量清单
+## AI-generated batch manifests
 
-推荐让 AI 或 Skill 生成 UTF-8 CSV：
+Use UTF-8 CSV for AI-generated reference lists:
 
 ```csv
 id,title,doi,url
 ref-0001,Attention Is All You Need,10.48550/arXiv.1706.03762,https://arxiv.org/abs/1706.03762
-ref-0002,Exact title from the source,10.xxxx/yyyy,
+ref-0002,Exact title known but DOI unknown,,
+ref-0003,Exact publisher paper title,10.xxxx/yyyy,
 ```
 
-字段含义：
-
-| 字段 | 规则 |
+| Field | Rule |
 | --- | --- |
-| `id` | 任务内稳定且唯一，用于结果关联和恢复。缺失时后端生成 `rowN`；重复时追加序号。 |
-| `title` | 保留来源中的原始标题，不根据记忆改写。 |
-| `doi` | 可以是裸 DOI、`doi:` 前缀或 DOI URL；后端会规范化。 |
-| `url` | 仅接受带主机名的 HTTP(S) URL；去除 fragment，不接受内嵌账号密码。 |
+| `id` | Stable and unique within the job. Missing IDs become `rowN`; repeated IDs receive a suffix. |
+| `title` | Preserve the exact source title. Do not rewrite it from memory. |
+| `doi` | May be a bare DOI, a `doi:` value, or a DOI URL; the backend normalizes it. |
+| `url` | Must be an HTTP(S) URL with a hostname. Fragments are removed and embedded credentials are rejected. |
 
-`title`、`doi`、`url` 至少一个非空。工具不会凭空补写缺失字段。
+At least one of `title`, `doi`, or `url` must be present. For title-only work, preserve the complete source title and leave DOI and URL empty.
 
-批量下载：
+### How title-only identity is confirmed
+
+Title-only rows query arXiv, Crossref, and OpenAlex. `oa_fetch_results.json` preserves each candidate source, title, DOI, score, year, and first author. Automatic confirmation always requires at least two independent sources to return the same normalized DOI, with a title score of at least `0.85` for each source:
+
+- if at least one corroborating candidate title is an exact normalized match, the reason is `exact_title`;
+- otherwise the reason is `multiple_sources_same_doi`.
+
+An exact result from only one source is insufficient. Lower thresholds are candidate discovery only. Different high-confidence DOI values produce `pending/title_resolution_ambiguous`. No trusted candidate produces `failed/title_resolution_unresolved`. None of these cases downloads an arbitrary candidate.
+
+An arXiv repository DOI such as `10.48550/arXiv.*` can coexist with the final publisher DOI. It is recorded as an alias only when the arXiv title is exact and at least two independent sources corroborate one publisher DOI. One publisher source cannot override an arXiv DOI, and two different publisher DOI values remain ambiguous. The alias, arXiv OA URL, and complete candidate evidence remain in the JSON report.
+
+Use titles copied from the paper, a search result, or the original reference. A translated title, shorthand, truncated title, or description such as "that paper by Smith" is not suitable for unattended resolution. Supply a DOI, a supported IEEE/Wiley/ScienceDirect article URL, or the exact original title instead.
+
+Run a batch:
 
 ```bash
 python3 oa_fetch.py \
@@ -102,9 +158,9 @@ python3 oa_fetch.py \
   --format text
 ```
 
-正常批量运行会自动在输出目录写入 `oa_fetch_manifest.csv`。该文件只保留规范化后的唯一可执行记录，可用于再次运行和断点续跑。
+A normal batch writes `oa_fetch_manifest.csv` to the output directory. It contains normalized, unique executable inputs for resume. Resolved DOI values and candidate evidence stay in the result and state files rather than being written back as if the user supplied them.
 
-只做离线规范化和去重，不发起元数据查询或 PDF 下载：
+Perform an offline normalization and deduplication preflight without title queries or PDF downloads:
 
 ```bash
 python3 oa_fetch.py \
@@ -112,27 +168,29 @@ python3 oa_fetch.py \
   --manifest-out "/absolute/path/to/oa_fetch_manifest.csv"
 ```
 
-仍然支持：
+A successful `--manifest-out` run only proves that the input has at least one executable row; it does not mean a DOI was resolved or a PDF was downloaded.
 
-- Markdown 表格：列名可以使用 `title`/`题名`、`url`/`链接`、`doi` 和 `id`/`标记`；
-- CSV：支持相同字段及常见英文别名；
-- 纯文本：每行一个 DOI、URL 或标题，忽略空行和以 `#` 开头的行。
+Other supported inputs:
 
-## 保存一次配置
+- Markdown tables with `title`/`题名`, `url`/`链接`, `doi`, and `id`/`标记` columns, plus common aliases;
+- CSV with the same fields and common English aliases;
+- plain text with one DOI, URL, or title per line, ignoring blank lines and lines beginning with `#`.
 
-非敏感偏好保存在：
+## Save preferences once
+
+Non-sensitive preferences are stored in:
 
 ```text
 ~/.oa-paper-fetch/config.json
 ```
 
-配置优先级固定为：
+Precedence is fixed:
 
 ```text
-本次显式 CLI 参数 > 本地配置 > 内置默认值
+explicit CLI option for this run > local config > built-in default
 ```
 
-设置默认目录和 OA 论文条目间隔：
+Save a default destination and OA item interval:
 
 ```bash
 python3 oa_fetch.py \
@@ -141,7 +199,7 @@ python3 oa_fetch.py \
   --save-config
 ```
 
-把学校访问保存为 OA 失败后的长期偏好：
+Save institutional fallback as a standing preference:
 
 ```bash
 python3 oa_fetch.py \
@@ -152,52 +210,52 @@ python3 oa_fetch.py \
   --save-config
 ```
 
-以后不需要重复传这些参数。本次只使用 OA 时，用 `--oa-only` 临时覆盖：
+Future runs can omit those options. Use `--oa-only` to override a saved institutional preference for one run:
 
 ```bash
 python3 oa_fetch.py --batch refs.csv --oa-only
 ```
 
-配置文件只允许以下字段：
+Only these keys are accepted:
 
-| 配置 | 内置默认值 | 范围或行为 |
+| Setting | Built-in default | Range or behavior |
 | --- | ---: | --- |
-| `output_dir` | `~/Desktop/Papers` | 必须是展开 `~` 后的绝对路径。 |
-| `oa_delay` | 1 秒 | 论文条目之间 0–60 秒。 |
-| `timeout` | 30 秒 | 5–300 秒。 |
-| `institutional` | `false` | 只有用户显式保存后才作为长期回退。 |
-| `browser_profile` | `~/.oa-paper-fetch/profile` | 只保存 profile 路径，不保存其中的数据。 |
-| `inst_delay` | 4 秒 | 不能低于 4 秒。 |
-| `inst_jitter` | 3 秒 | 0–10 秒。 |
-| `max_institutional` | 30 | 1–30 次机构尝试。 |
-| `headless` | `false` | 仅复用已经验证可用的登录会话。 |
+| `output_dir` | `~/Desktop/Papers` | Must expand to an absolute path. |
+| `oa_delay` | 1 second | 0–60 seconds between paper items. |
+| `timeout` | 30 seconds | 5–300 seconds. |
+| `institutional` | `false` | Becomes a standing fallback only after the user explicitly saves it. |
+| `browser_profile` | `~/.oa-paper-fetch/profile` | Stores only the profile path, never the profile data. |
+| `inst_delay` | 4 seconds | 4–86400 seconds. |
+| `inst_jitter` | 3 seconds | 0–10 seconds. |
+| `max_institutional` | 30 | 1–30 institutional attempts. |
+| `headless` | `false` | Reuse only an already verified login profile. |
 
-配置目录尽力设置为 `0700`，配置文件设置为 `0600`，并通过同目录临时文件原子替换。未知字段会被忽略；保存时只写白名单字段。配置中绝不能放入密码、MFA、Cookie、token、Authorization header 或 Playwright storage state。
+The config directory is best-effort `0700` and the file is `0600`. Saving uses an atomic same-directory replacement. Unknown keys are ignored and only the whitelist is serialized. Never place a password, MFA code, Cookie, token, Authorization header, or Playwright storage state in the config.
 
-## 学校机构访问
+## Institutional access
 
-### 安装可选浏览器依赖
+### Install the optional browser dependency
 
 ```bash
 python3 -m pip install -r requirements.txt
 python3 -m playwright install chromium
 ```
 
-### 首次登录或刷新会话
+### First login or session refresh
 
 ```bash
 python3 oa_fetch.py --institutional-login
 ```
 
-程序会打开可见浏览器，并分别打开 IEEE Xplore、ScienceDirect 和 Wiley Online Library。用户需要在浏览器中自行选择学校机构访问并完成 SSO/MFA；程序不会点击或填写认证字段。确认网站登录完成后，回到终端按 Enter。
+The command opens a visible browser and visits IEEE Xplore, ScienceDirect, and Wiley Online Library. The user selects institutional access and completes SSO/MFA manually. The program does not click or fill authentication fields. Return to the terminal and press Enter after the sites are ready.
 
-登录会话保存在 `~/.oa-paper-fetch/profile`。该目录包含敏感 Cookie，只应留在本机；不要查看、同步、上传、分享或提交到 Git。
+The persistent session lives in `~/.oa-paper-fetch/profile`. It contains sensitive session data and must remain local. Do not inspect, synchronize, upload, share, or commit it.
 
-机构后端优先尝试 Playwright 管理的系统 Google Chrome channel，失败后尝试 Playwright Chromium。它使用独立持久化 profile，不会附着到已经打开的 Chrome，也不会复用日常 Chrome profile。
+The institutional backend first tries the Playwright-managed system Google Chrome channel and then falls back to Playwright Chromium. It uses an isolated persistent profile and does not attach to an already-open Chrome window or reuse the daily browsing profile.
 
-### 复用登录会话
+### Reuse the session
 
-一次性启用：
+Enable institutional fallback for one run:
 
 ```bash
 python3 oa_fetch.py \
@@ -207,37 +265,37 @@ python3 oa_fetch.py \
   --format text
 ```
 
-如果已经通过 `--save-config` 保存了 `institutional=true`，后续可省略 `--institutional`。`--headless` 只适合复用已经成功工作的 profile；首次登录和登录修复始终必须使用可见浏览器。
+If `institutional=true` was saved with `--save-config`, `--institutional` can be omitted. `--headless` is only for an already working profile. Initial login and login repair must remain visible.
 
-工具不会根据上次登录时间推断会话仍有效。profile 缺失时，符合机构回退条件的记录变为 `pending/profile_missing_login_required`；出现非 PDF 登录页或 HTTP 4xx 时，该记录变为 `pending/login_refresh_required`；自上次成功 PDF 以来累计 3 次 HTTP 4xx 或 challenge 后，本轮机构阶段停止并提示重新登录。
+The tool does not infer that a session is valid from its age. A missing profile becomes `pending/profile_missing_login_required`. A non-PDF login page or HTTP 4xx becomes `pending/login_refresh_required`. When an expected title exists, a missing publisher title becomes `pending/publisher_title_unverifiable`, while a disagreement becomes `pending/publisher_title_mismatch`. After three HTTP 4xx or challenge responses since the last successful PDF, the institutional phase stops and requests a visible login refresh.
 
-### 下载节奏
+### Pacing
 
-OA 和机构阶段都串行处理：
+Both phases are serial:
 
-| 阶段 | 默认节奏 | 可设置范围 |
+| Phase | Default pacing | Configurable range |
 | --- | ---: | ---: |
-| OA 论文条目 | 每篇间隔 1 秒 | `--oa-delay 0–60` 秒 |
-| 机构访问 | 4 秒基础延迟 + 0–3 秒随机延迟 | 基础延迟至少 4 秒，jitter 0–10 秒 |
+| OA paper item | 1 second between items | `--oa-delay 0–60` seconds |
+| Institutional item | 4-second base delay plus 0–3 seconds of jitter | base 4–86400 seconds, jitter 0–10 seconds |
 
-机构访问单次最多 30 篇。自上次成功 PDF 以来累计出现 3 次 HTTP 4xx、challenge 或登录墙后停止。超过上限或因登录问题未执行的记录写入 `oa_fetch_pending.csv`；程序不会自动启动下一批。
+At most 30 institutional papers are attempted in one run. Three HTTP 4xx, challenge, or login-wall responses since the last successful PDF stop the phase. Overflow and login-gated work are written to `oa_fetch_pending.csv`. The program never starts another batch automatically.
 
-## 断点续跑
+## Resume an interrupted job
 
-每篇论文根据规范化 DOI、URL 或标题身份生成稳定的 8 位哈希后缀，避免不同论文因标题相同而覆盖。文件名总长度控制在 240 UTF-8 字节以内。
+Each paper receives a stable 8-character hash suffix from its normalized DOI, URL, or title identity. Filenames are limited to 240 UTF-8 bytes.
 
-PDF、状态和报告均使用同目录临时文件后原子替换。重跑同一输出目录时：
+PDFs, state, and reports use same-directory temporary files followed by atomic replacement. Re-running the same output directory:
 
-1. 读取 `oa_fetch_state.json`；
-2. 根据 canonical identity 定位上一份文件；
-3. 检查文件存在、大小大于 5 字节且以 `%PDF` 开头；
-4. 验证通过则返回 `exists`，通常不再发起网络请求；旧版状态第一次由命名规则升级时，可以只查询一次书目信息；
-5. 文件缺失或损坏则重新下载；
-6. 失败和 pending 项继续尝试，成功项保持跳过。
+1. reads `oa_fetch_state.json`;
+2. locates the previous file by canonical identity;
+3. verifies that it exists, is larger than 5 bytes, and begins with `%PDF`;
+4. returns `exists` and normally skips the network; the first migration from an older naming version may make one metadata query;
+5. re-downloads a missing or corrupt file;
+6. retries failed and pending items while keeping successful items skipped.
 
-命名升级不会重新下载 PDF。后端先校验旧文件，再为新名称创建不覆盖的同 inode 硬链接；只有恢复状态已经原子写入新名称后才移除旧名称。若状态写入失败，则回滚新链接并保留旧文件。升级成功后，后续运行直接按新名称返回 `exists`。
+A naming upgrade does not re-download the PDF. The backend verifies the old file, creates a non-overwriting same-inode hard link under the new name, atomically records the new state, and only then removes the old name. A state-write failure rolls back the new link and keeps the old file.
 
-继续整个任务：
+Resume the complete manifest:
 
 ```bash
 python3 oa_fetch.py \
@@ -245,7 +303,7 @@ python3 oa_fetch.py \
   --out "/absolute/output"
 ```
 
-达到机构上限后，必须由用户再次明确要求，才能运行：
+After the institutional cap, another explicit user request is required:
 
 ```bash
 python3 oa_fetch.py \
@@ -254,104 +312,116 @@ python3 oa_fetch.py \
   --institutional
 ```
 
-同一输出目录不支持多个进程并发写入；一次只运行一个任务。
+Do not run multiple processes against the same output directory; there is no cross-process lock.
 
-## 输出状态与文件
+## Results and output files
 
-stdout 始终输出一个 JSON payload；`--format text` 只向 stderr 增加进度，不替换 stdout JSON。
+stdout always contains one JSON payload. `--format text` adds progress to stderr and does not replace stdout JSON.
 
-状态含义：
-
-| 状态 | 含义 |
+| Status | Meaning |
 | --- | --- |
-| `candidate` | dry-run 找到了候选地址，但没有下载 PDF。 |
-| `downloaded` | 本轮成功下载并验证 PDF。 |
-| `exists` | 状态记录中的 PDF 已存在且通过 `%PDF` 检查；除一次旧命名升级外，跳过网络。 |
-| `duplicate` | 与前一条 DOI 或 URL 相同，结果关联到首条记录。 |
-| `failed` | 未解析、没有可下载 OA、出版商不支持或下载失败。 |
-| `pending` | 需要新的用户请求、登录刷新或新的 30 篇机构批次。 |
+| `candidate` | A dry run found a candidate URL but did not download a PDF. |
+| `downloaded` | This run downloaded and verified a PDF. |
+| `exists` | The state file points to a PDF that still passes the `%PDF` check, so the network is skipped except for a one-time old-name migration query. |
+| `duplicate` | The DOI or URL duplicates an earlier row and points to that row's result. |
+| `failed` | Identity could not be resolved, no OA PDF was downloaded, the publisher is unsupported, or another download failed. |
+| `pending` | Identity is ambiguous, the publisher title mismatches or cannot be verified, login needs attention, or another institutional batch requires explicit approval. |
 
-输出目录可能包含：
+Important manual actions:
 
-- `*.pdf`：优先采用“年份_第一作者_标题”，并带 canonical identity 哈希后缀的论文；
-- `oa_fetch_manifest.csv`：规范化、去重后的可执行清单；
-- `oa_fetch_results.json`：详细元数据、来源查询、候选、下载尝试和机构结果；
-- `oa_fetch_results.csv`：便于筛选的扁平摘要；
-- `oa_fetch_state.json`：跨运行恢复状态和尝试历史；
-- `oa_fetch_pending.csv`：仅在需要显式继续时生成。
-
-`--dry-run` 找到候选时可以返回 `success: true` 和退出码 `0`，但不会写 PDF，也不会写恢复状态。
-
-## CLI 参数
-
-| 选项 | 作用 |
+| Reason | Next step |
 | --- | --- |
-| `--doi DOI` | 按 DOI 处理一篇论文。 |
-| `--title TITLE` | 按标题解析并处理一篇论文。 |
-| `--url URL` | 处理含 DOI 的 URL、arXiv URL 或直接 PDF URL。 |
-| `--batch PATH` | 读取 Markdown、CSV 或纯文本批量输入。 |
-| `--out PATH` | 本次输出目录；未给出时使用配置或 `~/Desktop/Papers`。 |
-| `--timeout SECONDS` | 请求超时，默认 30 秒。 |
-| `--oa-delay SECONDS` | OA 论文条目间隔，默认 1 秒，范围 0–60 秒。 |
-| `--config PATH` | 使用其他非敏感配置文件。 |
-| `--save-config` | 保存本次显式给出的白名单偏好；可以不带论文输入单独运行。 |
-| `--manifest-out PATH` | 与 `--batch` 一起使用，只做离线规范化和去重。 |
-| `--overwrite` | 强制替换已有目标 PDF。 |
-| `--dry-run` | 查询候选和写结果报告，但不下载 PDF。 |
-| `--format json\|text` | stdout 始终为 JSON；`text` 额外输出 stderr 进度。 |
-| `--version` | 输出版本。 |
-| `--institutional` | 本轮启用机构回退，也可与 `--save-config` 保存为长期偏好。 |
-| `--oa-only` | 本轮关闭已配置的机构回退。 |
-| `--institutional-login` | 打开可见的首次登录或会话刷新流程。 |
-| `--browser-profile PATH` | 指定其他持久化 profile。 |
-| `--inst-delay SECONDS` | 机构访问基础延迟，不能低于 4 秒。 |
-| `--inst-jitter SECONDS` | 增加 0–10 秒随机延迟。 |
-| `--max-institutional N` | 单次机构尝试上限，范围 1–30。 |
-| `--headless` / `--no-headless` | 设置已建立 profile 的可见性偏好。 |
+| `title_resolution_ambiguous` | Inspect candidate DOI/title evidence and supply the correct DOI, supported URL, or corrected exact title. |
+| `title_resolution_unresolved` | Supply a DOI, supported URL, or exact original title. |
+| `publisher_title_mismatch` | Compare the expected title with the publisher's `citation_title`; do not blindly retry the same identity. |
+| `publisher_title_unverifiable` | Supply a verified DOI or supported article URL, or inspect why the publisher page did not expose `citation_title`. |
+| `profile_missing_login_required` | Complete the first visible institutional login. |
+| `login_refresh_required` | Refresh the expired session in a visible browser. |
+| `institutional_cap_reached` | Wait for another explicit user request before running the pending manifest. |
 
-运行 `python3 oa_fetch.py --help` 查看当前完整参数。
+The output directory may contain:
 
-## 退出码
+- `*.pdf` — collision-safe PDFs named from verified year, first author, and title when available;
+- `oa_fetch_manifest.csv` — normalized, deduplicated executable inputs;
+- `oa_fetch_results.json` — complete metadata, title candidates, resolution decisions, download attempts, and institutional results;
+- `oa_fetch_results.csv` — a flat summary including `title_resolution_status`, `title_resolution_reason`, `resolved_doi`, `citation_title`, `publisher_title_match`, and `publisher_title_score`;
+- `oa_fetch_state.json` — cross-run state and attempt history;
+- `oa_fetch_pending.csv` — written only when explicit continuation is required.
 
-| 退出码 | 含义 |
+A dry run may return `success: true` and exit code `0` when a candidate exists, but it writes no PDF and no resume state.
+
+## CLI reference
+
+| Option | Purpose |
+| --- | --- |
+| `--doi DOI` | Process one paper by DOI. |
+| `--title TITLE` | Confirm one exact title through multiple sources, then process it. |
+| `--url URL` | Process a DOI-bearing URL, arXiv URL, or direct PDF URL. |
+| `--batch PATH` | Read Markdown, CSV, or plain-text input. |
+| `--out PATH` | Override the output directory for this run. |
+| `--timeout SECONDS` | Request timeout; built-in default 30 seconds. |
+| `--oa-delay SECONDS` | OA paper-item interval; built-in default 1 second, range 0–60. |
+| `--config PATH` | Use another non-sensitive config file. |
+| `--save-config` | Save explicitly provided whitelisted preferences; may run without a paper selector. |
+| `--manifest-out PATH` | With `--batch`, perform only offline normalization and deduplication. |
+| `--overwrite` | Replace an existing target PDF. |
+| `--dry-run` | Query candidates and write reports without downloading a PDF. |
+| `--format json\|text` | stdout remains JSON; `text` also writes progress to stderr. |
+| `--version` | Print the CLI version. |
+| `--institutional` | Enable institutional fallback for this run; may be saved as a preference. |
+| `--oa-only` | Disable a configured institutional fallback for this run. |
+| `--institutional-login` | Open the visible first-login or refresh flow. |
+| `--browser-profile PATH` | Use another persistent browser profile. |
+| `--inst-delay SECONDS` | Institutional base delay, range 4–86400 seconds. |
+| `--inst-jitter SECONDS` | Add 0–10 seconds of random delay. |
+| `--max-institutional N` | Limit institutional attempts to 1–30. |
+| `--headless` / `--no-headless` | Set visibility for an already established profile. |
+
+Run `python3 oa_fetch.py --help` for the current parser output.
+
+## Exit codes
+
+| Code | Meaning |
 | ---: | --- |
-| `0` | 所有正常任务已解决；所有 dry-run 项目找到候选；或 manifest 预检产生至少一条可用记录。 |
-| `1` | 至少一个正常任务仍为 `failed` 或 `pending`。 |
-| `2` | CLI 或配置无效，包括非法范围、缺少选择器或登录时显式使用 headless。 |
-| `3` | 批量文件不存在、输入为空，或 manifest 预检没有可用记录。 |
-| `4` | 网络/传输异常，或输出、配置、状态、manifest、PDF、报告写入失败。 |
+| `0` | All normal tasks resolved; every dry-run item found a candidate; or manifest preflight produced at least one executable row. |
+| `1` | At least one normal item remains `failed` or `pending`. |
+| `2` | Invalid CLI/configuration, including a missing selector, invalid range, or explicit headless login. |
+| `3` | Missing/empty batch input or manifest preflight with no executable rows. |
+| `4` | Network/transport failure or an output, config, state, manifest, PDF, or report write failure. |
 
-## 安全与访问边界
+## Safety and access boundaries
 
-- OA 下载只接受标准端口上的 HTTP(S) URL，拒绝 localhost、常见本地域名空间、metadata 地址以及显式的私有、环回、链路本地、保留和组播 IP，并在每次重定向时重新检查 URL。
-- 两个下载后端都把单个 PDF 限制在 80 MiB，并要求内容以 `%PDF` 开头后才原子写入。
-- 机构访问只允许 DOI 和 IEEE、Wiley、Elsevier 页面；最终 PDF 必须与文章页面属于同一家出版商。
-- 不使用 Sci-Hub，不绕过付费墙，不自动处理 CAPTCHA，不轮换代理，不规避反爬措施。
-- 不要把密码、MFA、恢复码、Cookie、API secret 或 token 放入清单、配置、命令、Issue 或日志。
-- 本工具只适合用户本人有权访问的论文，不用于系统性采集或自动连续批量下载。
+- OA downloads accept standard-port HTTP(S) URLs only. Localhost, common local namespaces, metadata hosts, and explicit private, loopback, link-local, reserved, or multicast IP addresses are rejected, and redirects are checked again.
+- Both download backends cap one PDF at 80 MiB and require a `%PDF` signature before atomic storage.
+- Title-only mode never accepts the highest-scoring candidate by ranking alone and never requests a PDF when identity conflicts.
+- Institutional access accepts DOI and the allowlisted IEEE, Wiley, and Elsevier pages only; the final PDF must stay within the same publisher.
+- The tool never uses Sci-Hub, bypasses a paywall, automates CAPTCHA, rotates proxies, or evades anti-bot controls.
+- Never put a password, MFA/recovery code, Cookie, API secret, or token in a manifest, config, command, issue, or log.
+- Use the tool only for papers the current user is entitled to access. It is not a systematic harvesting or continuous unattended-download service.
 
-## 当前限制
+## Current limitations
 
-- 机构访问只支持 IEEE Xplore、Wiley Online Library 和 Elsevier ScienceDirect。
-- 普通文章网页不会通用解析；`--url` 可靠支持的是含 DOI 的 URL、arXiv URL 和直接 PDF URL。
-- 仅有标题且 OA 阶段没有解析出 DOI 时，无法进入机构访问。
-- 标题疑似重复只做规范化后的精确匹配，不做模糊自动合并。
-- 出版商页面和登录策略可能变化；遇到登录墙时需要用户在可见浏览器中刷新会话。
-- 程序不能附着到已经打开的 Chrome，也不会保存学校账号和密码。
-- 没有定时守护进程；“下载间隔”指论文条目之间的节流，不是每天某个时刻自动启动。
-- 同一输出目录不提供跨进程锁。
-- 旧文件自动改名使用同目录硬链接；默认 macOS APFS 支持这一能力。若自定义输出目录位于不支持硬链接的 FAT/exFAT 等文件系统，PDF 仍保留在原名称，结果会报告 `filename_error`，不会退化为覆盖或删除原文件。
-- OA URL 检查不把域名的 DNS 解析结果固定到后续连接；这是为了兼容会把公网域名映射到合成地址的 VPN/代理环境。不要把该 CLI 作为接收不受信任 URL 的公网下载服务。
+- Institutional access supports only IEEE Xplore, Wiley Online Library, and Elsevier ScienceDirect.
+- General article-page parsing is not implemented. `--url` reliably supports DOI-bearing URLs, arXiv URLs, and direct PDF URLs.
+- Title-only input depends on live arXiv, Crossref, and OpenAlex metadata. A network failure, incomplete title, or candidate conflict requires a DOI or supported URL.
+- If an expected title exists but the publisher page omits `citation_title`, the item remains `pending/publisher_title_unverifiable`. An explicit DOI or URL task without an expected title may still use its anchored identity and fallback filename fields.
+- Possible title duplicates use normalized exact matching only; they are not merged fuzzily.
+- Publisher pages and login policies may change. A visible session refresh may be required.
+- The program cannot attach to an already-open Chrome process and never stores school usernames or passwords.
+- There is no scheduler. "Download interval" means pacing between paper items, not a daily launch time.
+- One output directory has no cross-process lock.
+- Old-file rename uses same-directory hard links. APFS supports this by default; FAT/exFAT or another filesystem without hard-link support keeps the original PDF and reports `filename_error` rather than overwriting or deleting it.
+- OA URL checks do not pin DNS results to the later connection so VPN/proxy environments with synthetic addresses continue to work. Do not expose this CLI as a public downloader for untrusted URLs.
 
-## 开发与测试
+## Development and testing
 
-离线测试覆盖配置优先级和权限、manifest 规范化与去重、arXiv 精确元数据命名、IEEE/Wiley/Elsevier citation 元数据、无覆盖文件迁移、OA 优先编排、恢复和 pending、原子写入、URL/重定向安全、出版商边界、限速参数及 Skill 契约：
+Offline tests cover config precedence and permissions, manifest normalization and deduplication, strict title-only DOI confirmation, conflicting DOI candidates, publisher-title guards, arXiv metadata naming, IEEE/Wiley/Elsevier citation metadata, non-overwriting migrations, OA-first orchestration, resume and pending behavior, atomic writes, URL/redirect safety, publisher boundaries, pacing, and the Codex/Claude Skill contract:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-真实 OA 冒烟：
+Real OA smoke test:
 
 ```bash
 tmpdir="$(mktemp -d)"
@@ -360,31 +430,38 @@ python3 oa_fetch.py \
   --out "$tmpdir" \
   --oa-delay 0
 
-# 再运行一次，结果状态应从 downloaded 变为 exists。
+# Run it again; the status should change from downloaded to exists.
 python3 oa_fetch.py \
   --url "https://arxiv.org/abs/1706.03762" \
   --out "$tmpdir" \
   --oa-delay 0
 ```
 
-机构登录和真实出版商下载依赖用户学校权限，不属于离线测试。验证时应使用可见登录、小批量论文，并确认两次机构访问间隔不低于 4 秒。
+Institutional login and live publisher downloads depend on the user's entitlement and are not part of the offline suite. Test them with a visible login, a small batch, and at least four seconds between institutional items.
 
-项目结构：
+Repository map:
 
 ```text
-SKILL.md                Codex 主入口与操作契约
-agents/openai.yaml      Skill 的 UI 元数据与默认提示
-oa_fetch.py             CLI、OA 查询、报告和机构回退编排
-institutional_fetch.py  受限的 Playwright 持久化会话后端
-config.py               非敏感本地配置、校验和优先级
-manifest.py             参考文献规范化、去重和 canonical identity
-store.py                稳定文件名、原子写入、恢复状态和 pending 清单
-requirements.txt        可选机构访问依赖
-tests/                  离线契约与边界测试
+README.md                                 English guide for people
+README.zh-CN.md                           Chinese guide for people
+AGENTS.md                                 AI development and maintenance manual
+CLAUDE.md                                 Thin Claude Code route to the AI manual
+SKILL.md                                  Canonical download workflow and safety contract
+.claude/skills/oa-paper-fetch/SKILL.md    Claude Code download Skill router
+agents/openai.yaml                        Codex Skill UI metadata and default prompt
+oa_fetch.py                               CLI, title resolution, OA, reports, fallback orchestration
+institutional_fetch.py                    Bounded Playwright session and publisher-title guard
+config.py                                 Non-sensitive config, validation, and precedence
+manifest.py                               Reference normalization, deduplication, canonical identity
+store.py                                  Stable filenames, atomic writes, resume state, pending manifest
+requirements.txt                          Optional institutional dependency
+tests/                                    Offline contract and boundary tests
 ```
 
-## 问题反馈与贡献
+## Support and contributing
 
-如需报告可复现问题或提出范围明确的改进，请创建 [GitHub Issue](https://github.com/Eason412/paper-fetch/issues)。请提供经过脱敏的命令、输入结构、退出码和错误名；不要上传浏览器 profile、Cookie、学校凭据或 token。
+Open a [GitHub issue](https://github.com/Eason412/paper-fetch/issues) for a reproducible problem or a scoped improvement. Include only sanitized commands, input shape, exit code, and error name. Never upload a browser profile, Cookie, school credential, or token.
 
-Pull Request 应保持 OA 优先、三家出版商白名单、机构硬限制和无凭据存储。项目由 [Eason412](https://github.com/Eason412) 维护，采用 [MIT License](LICENSE)。
+Pull requests must preserve OA-first behavior, the three-publisher allowlist, institutional pacing/caps, and the no-credential-storage boundary. The project is maintained by [Eason412](https://github.com/Eason412) under the [MIT License](LICENSE).
+
+AI agents modifying the repository should read [AGENTS.md](AGENTS.md) first. AI agents executing paper downloads must use [SKILL.md](SKILL.md) as the only operational contract.

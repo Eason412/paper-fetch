@@ -142,6 +142,155 @@ class OaFirstTests(unittest.TestCase):
         self.assertEqual(result["meta"]["title"], page_meta["title"])
         self.assertEqual(state["records"]["doi:10.1109/example"]["file"], expected_name)
 
+    def test_publisher_title_mismatch_is_pending_for_manual_resolution(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "out"
+            profile = tmp_path / "profile"
+            profile.mkdir()
+            (profile / "marker").write_text("fixture", encoding="utf-8")
+            batch = tmp_path / "refs.csv"
+            batch.write_text(
+                "id,title,doi,url\n"
+                "ref-1,Expected Paper Title,10.1109/example,\n",
+                encoding="utf-8",
+            )
+            failure = {
+                "success": False,
+                "status": "failed",
+                "meta": {
+                    "doi": "10.1109/example",
+                    "title": "Expected Paper Title",
+                },
+                "error": "no_open_access_pdf_downloaded",
+            }
+
+            def fake_fetch(items, **kwargs):
+                self.assertEqual(items[0]["expected_title"], "Expected Paper Title")
+                return [{
+                    "idx": items[0]["idx"],
+                    "success": False,
+                    "error": "publisher_title_mismatch",
+                    "meta": {
+                        "doi": "10.1109/example",
+                        "title": "Different Publisher Paper",
+                        "citation_title": "Different Publisher Paper",
+                        "expected_title": "Expected Paper Title",
+                        "publisher_title_match": False,
+                        "publisher_title_score": 0.2,
+                    },
+                }]
+
+            argv = [
+                "oa_fetch.py",
+                "--batch",
+                str(batch),
+                "--out",
+                str(out),
+                "--institutional",
+                "--browser-profile",
+                str(profile),
+                "--oa-delay",
+                "0",
+            ]
+            stdout = StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(oa_fetch, "resolve_item", return_value=failure),
+                mock.patch.object(
+                    institutional_fetch, "fetch_batch", side_effect=fake_fetch
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(StringIO()),
+            ):
+                exit_code = oa_fetch.main()
+
+            payload = __import__("json").loads(stdout.getvalue())
+            result = payload["results"][0]
+            pending_text = (out / "oa_fetch_pending.csv").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["pending_reason"], "publisher_title_mismatch")
+        self.assertEqual(
+            result["institutional"]["error"], "publisher_title_mismatch"
+        )
+        self.assertIn("publisher_title_mismatch", pending_text)
+
+    def test_missing_publisher_title_is_pending_for_manual_resolution(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "out"
+            profile = tmp_path / "profile"
+            profile.mkdir()
+            (profile / "marker").write_text("fixture", encoding="utf-8")
+            batch = tmp_path / "refs.csv"
+            batch.write_text(
+                "id,title,doi,url\n"
+                "ref-1,Expected Paper Title,10.1109/example,\n",
+                encoding="utf-8",
+            )
+            failure = {
+                "success": False,
+                "status": "failed",
+                "meta": {
+                    "doi": "10.1109/example",
+                    "title": "Expected Paper Title",
+                },
+                "error": "no_open_access_pdf_downloaded",
+            }
+
+            def fake_fetch(items, **kwargs):
+                self.assertEqual(items[0]["expected_title"], "Expected Paper Title")
+                return [{
+                    "idx": items[0]["idx"],
+                    "success": False,
+                    "error": "publisher_title_unverifiable",
+                    "meta": {
+                        "doi": "10.1109/example",
+                        "title": "Expected Paper Title",
+                        "expected_title": "Expected Paper Title",
+                        "publisher_title_match": None,
+                        "publisher_title_score": None,
+                    },
+                }]
+
+            argv = [
+                "oa_fetch.py",
+                "--batch",
+                str(batch),
+                "--out",
+                str(out),
+                "--institutional",
+                "--browser-profile",
+                str(profile),
+                "--oa-delay",
+                "0",
+            ]
+            stdout = StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(oa_fetch, "resolve_item", return_value=failure),
+                mock.patch.object(
+                    institutional_fetch, "fetch_batch", side_effect=fake_fetch
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(StringIO()),
+            ):
+                exit_code = oa_fetch.main()
+
+            payload = __import__("json").loads(stdout.getvalue())
+            result = payload["results"][0]
+            pending_text = (out / "oa_fetch_pending.csv").read_text(encoding="utf-8")
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["pending_reason"], "publisher_title_unverifiable")
+        self.assertEqual(
+            result["institutional"]["error"], "publisher_title_unverifiable"
+        )
+        self.assertIn("publisher_title_unverifiable", pending_text)
+
     def test_dry_run_never_enters_institutional_retry(self):
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
