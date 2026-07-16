@@ -89,7 +89,7 @@ The agent creates a temporary batch manifest and runs the backend. If trusted so
 
 ### Run one OA paper directly
 
-The OA layer requires Python 3.10 or newer and uses only the Python standard library. Run from the repository root:
+The OA layer requires Python 3.10 or newer and uses only the Python standard library. Unless stated otherwise, run all manual CLI, dependency-installation, and test commands below from the repository root. To fetch one OA paper:
 
 ```bash
 python3 oa_fetch.py \
@@ -133,7 +133,7 @@ ref-0003,Exact publisher paper title,10.xxxx/yyyy,
 | `id` | Stable and unique within the job. Missing IDs become `rowN`; repeated IDs receive a suffix. |
 | `title` | Preserve the exact source title. Do not rewrite it from memory. |
 | `doi` | May be a bare DOI, a `doi:` value, or a DOI URL; the backend normalizes it. |
-| `url` | Must be an HTTP(S) URL with a hostname. Fragments are removed and embedded credentials are rejected. |
+| `url` | Manifest parsing accepts an HTTP(S) URL with a hostname; fragments are removed and embedded credentials are rejected. Before download, OA URLs are additionally limited to ports 80/443, while institutional fallback accepts only HTTPS DOI hosts or allowlisted publisher hosts. |
 
 At least one of `title`, `doi`, or `url` must be present. For title-only work, preserve the complete source title and leave DOI and URL empty.
 
@@ -316,7 +316,7 @@ Do not run multiple processes against the same output directory; there is no cro
 
 ## Results and output files
 
-stdout always contains one JSON payload. `--format text` adds progress to stderr and does not replace stdout JSON.
+Paper-processing runs that reach final reporting, manifest preflight, and successful standalone config saves write one JSON payload to stdout. `--format text` adds progress to stderr without replacing the paper-result payload. `--help`, `--version`, and `--institutional-login` use human-readable output; argument/configuration errors and early file or write failures may exit before a JSON payload is produced.
 
 | Status | Meaning |
 | --- | --- |
@@ -366,7 +366,7 @@ A dry run may return `success: true` and exit code `0` when a candidate exists, 
 | `--manifest-out PATH` | With `--batch`, perform only offline normalization and deduplication. |
 | `--overwrite` | Replace an existing target PDF. |
 | `--dry-run` | Query candidates and write reports without downloading a PDF. |
-| `--format json\|text` | stdout remains JSON; `text` also writes progress to stderr. |
+| `--format json\|text` | For paper-processing runs, `text` adds progress to stderr while the final result payload remains JSON on stdout. |
 | `--version` | Print the CLI version. |
 | `--institutional` | Enable institutional fallback for this run; may be saved as a preference. |
 | `--oa-only` | Disable a configured institutional fallback for this run. |

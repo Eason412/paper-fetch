@@ -88,7 +88,7 @@ Claude Code 会按 `description` 自动选择 Skill，也可以显式使用 `/oa
 
 ### 直接运行一篇 OA 论文
 
-OA 层需要 Python 3.10 或更高版本，不依赖第三方 Python 包。在仓库根目录运行：
+OA 层需要 Python 3.10 或更高版本，不依赖第三方 Python 包。除非另有说明，后续手工执行的 CLI、依赖安装和测试命令都应从仓库根目录运行。下载一篇 OA 论文：
 
 ```bash
 python3 oa_fetch.py \
@@ -134,7 +134,7 @@ ref-0003,Exact publisher paper title,10.xxxx/yyyy,
 | `id` | 任务内稳定且唯一，用于结果关联和恢复。缺失时后端生成 `rowN`；重复时追加序号。 |
 | `title` | 保留来源中的原始标题，不根据记忆改写。 |
 | `doi` | 可以是裸 DOI、`doi:` 前缀或 DOI URL；后端会规范化。 |
-| `url` | 仅接受带主机名的 HTTP(S) URL；去除 fragment，不接受内嵌账号密码。 |
+| `url` | 清单解析接受带主机名的 HTTP(S) URL；去除 fragment，不接受内嵌账号密码。实际下载前，OA URL 还必须使用 80/443 端口；机构回退只接受 HTTPS DOI 主机或白名单内的出版商主机。 |
 
 `title`、`doi`、`url` 至少一个非空。只有标题时保留原始完整标题，并让 `doi`、`url` 留空；工具不会根据记忆补写缺失字段。
 
@@ -317,7 +317,7 @@ python3 oa_fetch.py \
 
 ## 输出状态与文件
 
-stdout 始终输出一个 JSON payload；`--format text` 只向 stderr 增加进度，不替换 stdout JSON。
+正常论文处理运行到最终报告阶段、manifest 预检成功写出结果时，以及单独成功保存配置时，stdout 会输出一个 JSON payload。`--format text` 只向 stderr 增加进度，不替换论文结果 payload。`--help`、`--version` 和 `--institutional-login` 使用便于阅读的文本输出；参数/配置错误以及较早发生的文件或写入失败可能在产生 JSON 前退出。
 
 状态含义：
 
@@ -369,7 +369,7 @@ stdout 始终输出一个 JSON payload；`--format text` 只向 stderr 增加进
 | `--manifest-out PATH` | 与 `--batch` 一起使用，只做离线规范化和去重。 |
 | `--overwrite` | 强制替换已有目标 PDF。 |
 | `--dry-run` | 查询候选和写结果报告，但不下载 PDF。 |
-| `--format json\|text` | stdout 始终为 JSON；`text` 额外输出 stderr 进度。 |
+| `--format json\|text` | 处理论文时，`text` 会向 stderr 增加进度，最终结果 payload 仍以 JSON 输出到 stdout。 |
 | `--version` | 输出版本。 |
 | `--institutional` | 本轮启用机构回退，也可与 `--save-config` 保存为长期偏好。 |
 | `--oa-only` | 本轮关闭已配置的机构回退。 |
