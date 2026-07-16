@@ -16,13 +16,18 @@ This is meant for filling in a handful of missing PDFs, not scraping.
 """
 from __future__ import annotations
 
+import math
 import random
 import re
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 MAX_PDF_BYTES = 80 * 1024 * 1024
+MIN_INSTITUTIONAL_DELAY = 4.0
+MAX_INSTITUTIONAL_JITTER = 10.0
+MAX_INSTITUTIONAL_ITEMS = 30
+DOI_HOSTS = {"doi.org", "dx.doi.org"}
 
 # Base URLs opened during `login` so the user can SSO into each publisher once.
 PUBLISHERS = {
@@ -30,6 +35,80 @@ PUBLISHERS = {
     "elsevier": "https://www.sciencedirect.com/",
     "wiley": "https://onlinelibrary.wiley.com/",
 }
+
+PUBLISHER_LANDING_HOSTS = {
+    "ieee": ("ieeexplore.ieee.org",),
+    "elsevier": ("sciencedirect.com", "linkinghub.elsevier.com"),
+    "wiley": ("onlinelibrary.wiley.com",),
+}
+
+PUBLISHER_PDF_HOSTS = {
+    "ieee": ("ieeexplore.ieee.org",),
+    "elsevier": ("sciencedirect.com",),
+    "wiley": ("onlinelibrary.wiley.com",),
+}
+
+
+def _host_matches(host: str, suffix: str) -> bool:
+    return host == suffix or host.endswith("." + suffix)
+
+
+def _publisher_from_url(url: str, *, pdf: bool = False) -> str | None:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme != "https" or not host:
+        return None
+    hosts_by_publisher = PUBLISHER_PDF_HOSTS if pdf else PUBLISHER_LANDING_HOSTS
+    for publisher, suffixes in hosts_by_publisher.items():
+        if any(_host_matches(host, suffix) for suffix in suffixes):
+            return publisher
+    return None
+
+
+def validate_institutional_options(
+    delay: float, jitter: float, max_items: int
+) -> None:
+    if not math.isfinite(delay) or delay < MIN_INSTITUTIONAL_DELAY:
+        raise ValueError(
+            f"--inst-delay must be at least {MIN_INSTITUTIONAL_DELAY:g} seconds"
+        )
+    if not math.isfinite(jitter) or not 0 <= jitter <= MAX_INSTITUTIONAL_JITTER:
+        raise ValueError(
+            f"--inst-jitter must be between 0 and {MAX_INSTITUTIONAL_JITTER:g} seconds"
+        )
+    if not 1 <= max_items <= MAX_INSTITUTIONAL_ITEMS:
+        raise ValueError(
+            f"--max-institutional must be between 1 and {MAX_INSTITUTIONAL_ITEMS}"
+        )
+
+
+def _allowed_landing_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+    except (TypeError, ValueError):
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        parsed.scheme == "https"
+        and (host in DOI_HOSTS or _publisher_from_url(url) is not None)
+    )
+
+
+def _prepare_profile_dir(profile_dir: str) -> Path:
+    path = Path(profile_dir).expanduser()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        path.chmod(0o700)
+    except OSError:
+        pass
+    return path
+
+
+def _quoted_doi(doi: str) -> str:
+    return quote(doi.strip(), safe="/:;()-._")
 
 
 def _load_playwright():
@@ -46,15 +125,14 @@ def _load_playwright():
 
 def _launch(p, profile_dir: str, headless: bool):
     """Launch a persistent context, preferring the system Chrome channel."""
-    Path(profile_dir).mkdir(parents=True, exist_ok=True)
+    profile_path = _prepare_profile_dir(profile_dir)
     last_error: Exception | None = None
     for channel in ("chrome", None):
         try:
             kwargs = dict(
-                user_data_dir=profile_dir,
+                user_data_dir=str(profile_path),
                 headless=headless,
                 accept_downloads=True,
-                args=["--disable-blink-features=AutomationControlled"],
             )
             if channel:
                 kwargs["channel"] = channel
@@ -105,7 +183,9 @@ def _meta(item: dict) -> dict:
     }
 
 
-def _pdf_url_from_page(page, doi: str | None) -> str | None:
+def _pdf_url_from_page(
+    page, doi: str | None, publisher: str
+) -> tuple[str | None, str | None]:
     """Prefer the citation_pdf_url meta tag; fall back to per-publisher patterns."""
     try:
         meta = page.get_attribute(
@@ -114,30 +194,68 @@ def _pdf_url_from_page(page, doi: str | None) -> str | None:
     except Exception:
         meta = None
     if meta:
-        return meta
+        if _publisher_from_url(meta, pdf=True) == publisher:
+            return meta, None
+        return None, "unsafe_pdf_url"
 
     url = page.url
-    host = (urlparse(url).hostname or "").lower()
-    if "ieee" in host:
+    if publisher == "ieee":
         m = re.search(r"/document/(\d+)", url)
         if m:
-            return f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={m.group(1)}"
-    if "sciencedirect" in host:
+            return (
+                f"https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber={m.group(1)}",
+                None,
+            )
+    if publisher == "elsevier":
         m = re.search(r"/pii/(\w+)", url)
         if m:
-            return f"https://www.sciencedirect.com/science/article/pii/{m.group(1)}/pdfft?download=true"
-    if "wiley" in host and doi:
-        return f"https://onlinelibrary.wiley.com/doi/pdfdirect/{doi}?download=true"
-    return None
+            return (
+                f"https://www.sciencedirect.com/science/article/pii/{m.group(1)}/pdfft?download=true",
+                None,
+            )
+    if publisher == "wiley" and doi:
+        return (
+            f"https://onlinelibrary.wiley.com/doi/pdfdirect/{_quoted_doi(doi)}?download=true",
+            None,
+        )
+    return None, "no_pdf_link_found"
 
 
-def _download(ctx, pdf_url: str, dest: Path, timeout: int) -> tuple[bool, str]:
-    try:
-        resp = ctx.request.get(pdf_url, timeout=timeout * 1000)
-    except Exception as exc:
-        return False, f"network_{type(exc).__name__}"
+def _download(
+    ctx, pdf_url: str, dest: Path, timeout: int, *, publisher: str
+) -> tuple[bool, str]:
+    if _publisher_from_url(pdf_url, pdf=True) != publisher:
+        return False, "unsafe_pdf_url"
+    current_url = pdf_url
+    resp = None
+    for _ in range(6):
+        try:
+            resp = ctx.request.get(
+                current_url, timeout=timeout * 1000, max_redirects=0
+            )
+        except Exception as exc:
+            return False, f"network_{type(exc).__name__}"
+        if not 300 <= resp.status < 400:
+            break
+        headers = {
+            str(key).lower(): value
+            for key, value in (getattr(resp, "headers", {}) or {}).items()
+        }
+        location = headers.get("location")
+        if not location:
+            return False, f"http_{resp.status}"
+        current_url = urljoin(current_url, location)
+        if _publisher_from_url(current_url, pdf=True) != publisher:
+            return False, "unsafe_pdf_url"
+    else:
+        return False, "too_many_redirects"
+    if resp is None:  # pragma: no cover - loop always executes
+        return False, "network_no_response"
     if not resp.ok:
         return False, f"http_{resp.status}"
+    final_url = getattr(resp, "url", current_url)
+    if _publisher_from_url(final_url, pdf=True) != publisher:
+        return False, "unsafe_pdf_url"
     try:
         body = resp.body()
     except Exception as exc:
@@ -167,6 +285,7 @@ def fetch_batch(
     Each item: {id, doi, title, url, dest, idx}. `dest` is the target PDF path;
     `idx` (if present) is echoed back so callers can merge with prior results.
     """
+    validate_institutional_options(delay, jitter, max_items)
     if not items:
         return []
     sync_playwright = _load_playwright()
@@ -179,50 +298,88 @@ def fetch_batch(
 
     with sync_playwright() as p:
         ctx = _launch(p, profile_dir, headless)
-        for i, item in enumerate(capped, 1):
-            base = {"meta": _meta(item), "idx": item.get("idx")}
-            doi = item.get("doi")
-            landing = item.get("url") or (f"https://doi.org/{doi}" if doi else None)
-            dest = Path(item["dest"])
+        try:
+            for i, item in enumerate(capped, 1):
+                base = {"meta": _meta(item), "idx": item.get("idx")}
+                doi = item.get("doi")
+                landing = f"https://doi.org/{_quoted_doi(doi)}" if doi else item.get("url")
+                dest = Path(item["dest"])
 
-            if dest.exists() and not overwrite:
-                results.append({**base, "success": True, "source": "institutional",
-                                "file": str(dest), "pdf_url": None, "note": "exists"})
-                continue
-            if not landing:
-                results.append({**base, "success": False, "error": "no_doi_or_url"})
-                continue
+                if dest.exists() and not overwrite:
+                    consecutive_blocks = 0
+                    results.append({**base, "success": True, "source": "institutional",
+                                    "file": str(dest), "pdf_url": None, "note": "exists"})
+                    continue
+                if not landing:
+                    consecutive_blocks = 0
+                    results.append({**base, "success": False, "error": "no_doi_or_url"})
+                    continue
+                if not _allowed_landing_url(landing):
+                    consecutive_blocks = 0
+                    results.append({**base, "success": False,
+                                    "error": "publisher_not_allowed"})
+                    continue
 
-            label = item.get("title") or doi or landing
-            print(f"[institutional {i}/{len(capped)}] {label}")
-            page = ctx.new_page()
-            try:
-                page.goto(landing, wait_until="domcontentloaded", timeout=timeout * 1000)
-                page.wait_for_timeout(1500)
-                pdf_url = _pdf_url_from_page(page, doi)
-                if not pdf_url:
-                    results.append({**base, "success": False, "error": "no_pdf_link_found"})
-                else:
-                    ok, reason = _download(ctx, pdf_url, dest, timeout)
-                    if ok:
+                label = item.get("title") or doi or landing
+                print(f"[institutional {i}/{len(capped)}] {label}")
+                page = ctx.new_page()
+                try:
+                    page.goto(landing, wait_until="domcontentloaded", timeout=timeout * 1000)
+                    page.wait_for_timeout(1500)
+                    publisher = _publisher_from_url(page.url)
+                    if not publisher:
                         consecutive_blocks = 0
-                        results.append({**base, "success": True, "source": "institutional",
-                                        "pdf_url": pdf_url, "file": str(dest)})
+                        results.append({**base, "success": False,
+                                        "error": "publisher_not_allowed"})
                     else:
-                        if reason.startswith("http_4") or "challenge" in reason:
-                            consecutive_blocks += 1
-                        results.append({**base, "success": False, "pdf_url": pdf_url, "error": reason})
-            except Exception as exc:
-                results.append({**base, "success": False, "error": f"{type(exc).__name__}"})
-            finally:
-                page.close()
+                        pdf_url, pdf_error = _pdf_url_from_page(page, doi, publisher)
+                        if not pdf_url:
+                            consecutive_blocks = 0
+                            results.append({**base, "success": False,
+                                            "error": pdf_error or "no_pdf_link_found"})
+                        else:
+                            ok, reason = _download(
+                                ctx, pdf_url, dest, timeout, publisher=publisher
+                            )
+                            if ok:
+                                consecutive_blocks = 0
+                                results.append({**base, "success": True,
+                                                "source": "institutional",
+                                                "pdf_url": pdf_url, "file": str(dest)})
+                            else:
+                                if reason.startswith("http_4") or "challenge" in reason:
+                                    consecutive_blocks += 1
+                                else:
+                                    consecutive_blocks = 0
+                                results.append({**base, "success": False,
+                                                "pdf_url": pdf_url, "error": reason})
+                except Exception as exc:
+                    consecutive_blocks = 0
+                    results.append({**base, "success": False,
+                                    "error": f"{type(exc).__name__}"})
+                finally:
+                    page.close()
 
-            if consecutive_blocks >= 3:
-                print("[institutional] aborting: 3 consecutive blocks/login walls — "
-                      "check that you are still signed in.")
-                results.append({"success": False, "idx": None,
-                                "error": "aborted_after_repeated_blocks", "meta": {}})
-                break
-            time.sleep(delay + random.random() * jitter)
-        ctx.close()
+                if consecutive_blocks >= 3:
+                    print("[institutional] aborting: 3 consecutive blocks/login walls — "
+                          "check that you are still signed in.")
+                    for remaining in capped[i:]:
+                        results.append({
+                            "meta": _meta(remaining),
+                            "idx": remaining.get("idx"),
+                            "success": False,
+                            "error": "aborted_after_repeated_blocks",
+                        })
+                    break
+                if i < len(capped):
+                    time.sleep(delay + random.random() * jitter)
+        finally:
+            ctx.close()
+    for item in items[max_items:]:
+        results.append({
+            "meta": _meta(item),
+            "idx": item.get("idx"),
+            "success": False,
+            "error": "institutional_cap_reached",
+        })
     return results

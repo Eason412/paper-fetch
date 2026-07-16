@@ -23,11 +23,11 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 MAX_PDF_BYTES = 80 * 1024 * 1024
 DEFAULT_TIMEOUT = 30
 DEFAULT_PROFILE_DIR = Path.home() / ".oa-paper-fetch" / "profile"
-UA = "oa-paper-fetch/0.1.0 (+legal-open-access)"
+UA = f"oa-paper-fetch/{VERSION} (+legal-open-access)"
 PDF_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -63,8 +63,25 @@ def safe_url(url: str) -> bool:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
+        # urllib/socket accept several legacy numeric loopback spellings that
+        # ipaddress intentionally rejects (for example 2130706433 or 0177.0.0.1).
+        if re.fullmatch(r"(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}",
+                        host, re.I):
+            return False
         return True
     return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Apply the same public-URL policy to every HTTP redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        if not safe_url(target):
+            raise urllib.error.HTTPError(
+                target, code, "unsafe redirect target", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
 
 
 def normalize_title(text: str) -> str:
@@ -291,7 +308,8 @@ def download_pdf(url: str, dest: Path, timeout: int, overwrite: bool) -> tuple[b
         return True, "exists"
     req = urllib.request.Request(url, headers={"User-Agent": PDF_UA, "Accept": "application/pdf,*/*"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        opener = urllib.request.build_opener(SafeRedirectHandler())
+        with opener.open(req, timeout=timeout) as response:
             data = response.read(MAX_PDF_BYTES + 1)
     except urllib.error.HTTPError as exc:
         return False, f"http_{exc.code}"
@@ -463,7 +481,8 @@ def parse_batch(path: Path) -> list[dict]:
 
 def write_reports(results: list[dict], out_dir: Path) -> None:
     (out_dir / "oa_fetch_results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    fields = ["success", "source", "file", "pdf_url", "doi", "title", "source_id", "error"]
+    fields = ["success", "source", "file", "pdf_url", "doi", "title",
+              "source_id", "error", "institutional_error"]
     with (out_dir / "oa_fetch_results.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -478,6 +497,7 @@ def write_reports(results: list[dict], out_dir: Path) -> None:
                 "title": meta.get("title"),
                 "source_id": meta.get("source_id"),
                 "error": result.get("error"),
+                "institutional_error": (result.get("institutional") or {}).get("error"),
             })
 
 
@@ -502,9 +522,12 @@ def main() -> int:
                       help="open a browser to sign in via institutional SSO once, then exit")
     inst.add_argument("--browser-profile", type=Path, default=DEFAULT_PROFILE_DIR,
                       help=f"persistent browser profile dir (default: {DEFAULT_PROFILE_DIR})")
-    inst.add_argument("--inst-delay", type=float, default=4.0, help="min seconds between institutional requests")
-    inst.add_argument("--inst-jitter", type=float, default=3.0, help="added random seconds of delay")
-    inst.add_argument("--max-institutional", type=int, default=30, help="max institutional downloads per run")
+    inst.add_argument("--inst-delay", type=float, default=4.0,
+                      help="base seconds between institutional requests (minimum: 4)")
+    inst.add_argument("--inst-jitter", type=float, default=3.0,
+                      help="added random delay in seconds (0 to 10)")
+    inst.add_argument("--max-institutional", type=int, default=30,
+                      help="institutional attempts per run (1 to 30)")
     inst.add_argument("--headless", action="store_true", help="run the institutional browser headless")
     args = parser.parse_args()
 
@@ -519,7 +542,19 @@ def main() -> int:
     if not (args.doi or args.title or args.url or args.batch):
         parser.error("one of --doi/--title/--url/--batch is required (or use --institutional-login)")
 
-    args.out.mkdir(parents=True, exist_ok=True)
+    from institutional_fetch import validate_institutional_options
+    try:
+        validate_institutional_options(
+            args.inst_delay, args.inst_jitter, args.max_institutional
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    try:
+        args.out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Could not create output directory: {exc}", file=sys.stderr)
+        return 4
     if args.batch:
         if not args.batch.exists():
             print(f"Batch file not found: {args.batch}", file=sys.stderr)
@@ -579,7 +614,11 @@ def main() -> int:
                     prev.update({"success": True, "source": r.get("source", "institutional"),
                                  "pdf_url": r.get("pdf_url"), "file": r.get("file"), "error": None})
 
-    write_reports(results, args.out)
+    try:
+        write_reports(results, args.out)
+    except OSError as exc:
+        print(f"Could not write result reports: {exc}", file=sys.stderr)
+        return 4
     summary = {"total": len(results), "succeeded": sum(1 for r in results if r.get("success")), "failed": sum(1 for r in results if not r.get("success"))}
     payload = {"ok": summary["failed"] == 0, "summary": summary, "results": results, "reports": {"json": str(args.out / "oa_fetch_results.json"), "csv": str(args.out / "oa_fetch_results.csv")}}
     print(json.dumps(payload, ensure_ascii=False, indent=2))
