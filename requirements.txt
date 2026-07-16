@@ -1,0 +1,7 @@
+# Core open-access fetch (oa_fetch.py OA layer) uses only the Python standard
+# library and needs nothing here.
+#
+# The institutional (SSO) layer needs Playwright + a Chromium build:
+#   pip install -r requirements.txt
+#   playwright install chromium
+playwright>=1.40

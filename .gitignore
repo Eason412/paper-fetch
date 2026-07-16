@@ -1,0 +1,15 @@
+# downloaded PDFs and run reports
+pdfs/
+*.pdf
+oa_fetch_results.json
+oa_fetch_results.csv
+
+# logged-in browser session (contains your authenticated cookies — never commit)
+profile/
+.oa-paper-fetch/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
