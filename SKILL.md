@@ -27,7 +27,10 @@ do not make them assemble CLI commands unless they request the commands.
 - Treat `~/.oa-paper-fetch/profile` as sensitive. Keep it local; never inspect,
   print, copy, upload, synchronize, or commit its contents.
 - Do not invent bibliographic metadata. Preserve titles, DOI values, and URLs
-  from the user or source material; leave unknown fields empty.
+  from the user or source material; leave unknown fields empty. For filename
+  metadata, accept arXiv Atom records and citation tags on the allowed
+  publisher article page as source material. Never infer year or author from
+  a URL, journal name, or memory.
 
 ## Resolve paths
 
@@ -162,12 +165,42 @@ a missing or rejected profile without inspecting its contents.
 If `UNPAYWALL_EMAIL` is already configured, let the backend use it. Never ask
 the user to reveal its value in chat or logs.
 
+## Preserve accurate PDF names
+
+Let the backend name PDFs as
+`year_first-author_full-title_stable-hash.pdf`. The stable hash belongs to the
+canonical identity and must remain present even when all bibliographic fields
+are known.
+
+- For arXiv URLs and arXiv DOI values, let the backend query the exact arXiv ID
+  and use its title, publication year, and first author.
+- For entitled IEEE Xplore, Wiley Online Library, and ScienceDirect downloads,
+  let the institutional backend read the article page's `citation_title`,
+  first `citation_author`, publication date, and DOI before finalizing the
+  filename.
+- If those fields are unavailable, keep the download and use the most specific
+  non-invented fallback: known title, arXiv ID, DOI, PII/IEEE document ID, or
+  URL basename.
+- Never overwrite a different file at the desired name. Report
+  `filename_error` and retain the verified PDF at its existing name.
+- If the output filesystem does not support same-directory hard links, retain
+  the old filename and report the migration error; do not copy over or delete
+  the original as a fallback.
+- Treat `renamed_from` as evidence that an already downloaded PDF was migrated,
+  not downloaded again.
+
 ## Resume and continue
 
 Treat rerunning the same canonical manifest in the same output directory as a
 resume. Let the backend verify `%PDF`, reuse the canonical identity and state,
 skip verified successes as `exists`, and retry unresolved items. Do not use
 `--overwrite` unless the user explicitly requests a replacement.
+
+An old state record without the current naming version may perform one
+metadata-only refresh. The backend must verify the old PDF, create the new name
+without overwriting, save state, and only then remove the old name. It must not
+redownload the PDF merely to improve its filename. Subsequent resumes should
+return `exists` without another metadata lookup.
 
 When `oa_fetch_pending.csv` exists:
 
@@ -188,9 +221,13 @@ Inspect the stdout JSON and `oa_fetch_results.json`. Report counts and paths for
 `downloaded`, `exists`, `duplicate`, `failed`, and `pending`. Treat `candidate`
 as dry-run evidence only, never as a downloaded PDF.
 
+When present, also report `renamed_from`, `filename_error`, and
+`filename_metadata_error`. Verify that a renamed file exists at the reported
+path before describing the migration as complete.
+
 The output directory contains:
 
-- collision-safe PDF files;
+- accurately named, collision-safe PDF files;
 - `oa_fetch_manifest.csv`, the normalized unique manifest;
 - `oa_fetch_results.json` and `oa_fetch_results.csv`;
 - `oa_fetch_state.json`, the local resume state;

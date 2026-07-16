@@ -41,6 +41,88 @@ class StoreResumeTests(unittest.TestCase):
         self.assertLessEqual(len(first.encode("utf-8")), 240)
         self.assertTrue(first.endswith(".pdf"))
 
+    def test_pdf_filename_migration_is_verified_and_non_overwriting(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "old.pdf"
+            target = root / "new.pdf"
+            source.write_bytes(b"%PDF-1.7\nfixture")
+
+            store.prepare_pdf_migration(source, target)
+            self.assertTrue(source.samefile(target))
+            store.finish_pdf_migration(source, target)
+
+            self.assertFalse(source.exists())
+            self.assertEqual(target.read_bytes(), b"%PDF-1.7\nfixture")
+
+    def test_pdf_filename_migration_refuses_a_distinct_existing_target(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "old.pdf"
+            target = root / "new.pdf"
+            source.write_bytes(b"%PDF-1.7\nsource")
+            target.write_bytes(b"%PDF-1.7\ntarget")
+
+            with self.assertRaises(FileExistsError):
+                store.prepare_pdf_migration(source, target)
+
+            self.assertEqual(source.read_bytes(), b"%PDF-1.7\nsource")
+            self.assertEqual(target.read_bytes(), b"%PDF-1.7\ntarget")
+
+    def test_interrupted_same_inode_migration_can_finish_on_retry(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "old.pdf"
+            target = root / "new.pdf"
+            source.write_bytes(b"%PDF-1.7\nfixture")
+            store.prepare_pdf_migration(source, target)
+
+            store.prepare_pdf_migration(source, target)
+            store.finish_pdf_migration(source, target)
+
+            self.assertFalse(source.exists())
+            self.assertTrue(store.verify_pdf(target))
+
+    def test_failed_state_write_rolls_back_new_name_and_result_path(self):
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            source = out / "old.pdf"
+            target = out / "new.pdf"
+            source.write_bytes(b"%PDF-1.7\nfixture")
+            store.prepare_pdf_migration(source, target)
+            canonical_id = "doi:10.1000/a"
+            state = store.new_state()
+            state["records"][canonical_id] = {
+                "input_ids": ["ref-1"],
+                "file": source.name,
+                "status": "downloaded",
+                "runs": [],
+            }
+            item = {"id": "ref-1", "canonical_id": canonical_id}
+            result = {
+                "success": True,
+                "status": "exists",
+                "file": str(target),
+                "target_file": str(target),
+                "meta": {"title": "Paper"},
+                "renamed_from": source.name,
+            }
+
+            with mock.patch.object(store, "save_state", side_effect=OSError("disk full")):
+                with self.assertRaises(OSError):
+                    oa_fetch._persist_result(
+                        state,
+                        out,
+                        item,
+                        result,
+                        migration_source=source,
+                    )
+
+            self.assertTrue(source.is_file())
+            self.assertFalse(target.exists())
+            self.assertEqual(result["file"], str(source))
+            self.assertEqual(state["records"][canonical_id]["file"], source.name)
+
     def test_state_round_trip_preserves_file_and_attempt_history(self):
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
@@ -52,6 +134,11 @@ class StoreResumeTests(unittest.TestCase):
                 "source": "openalex",
                 "file": str(out / "paper_deadbeef.pdf"),
                 "attempts": [{"source": "openalex", "result": "downloaded"}],
+                "meta": {
+                    "title": "Stored title",
+                    "year": 2026,
+                    "first_author": "Author",
+                },
             }
 
             store.record_result(state, item, result)
@@ -62,6 +149,8 @@ class StoreResumeTests(unittest.TestCase):
             self.assertEqual(record["file"], "paper_deadbeef.pdf")
             self.assertEqual(record["status"], "downloaded")
             self.assertEqual(record["input_ids"], ["ref-1"])
+            self.assertEqual(record["meta"]["title"], "Stored title")
+            self.assertEqual(record["naming_version"], store.NAMING_VERSION)
             self.assertEqual(len(record["runs"]), 1)
             self.assertEqual(json.loads((out / store.STATE_FILENAME).read_text())["version"], 1)
 

@@ -66,6 +66,82 @@ class OaFirstTests(unittest.TestCase):
         self.assertEqual(captured[0]["doi"], "10.1002/failure")
         self.assertEqual(captured[0]["idx"], 1)
 
+    def test_institutional_page_metadata_renames_download_and_updates_state(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "out"
+            profile = tmp_path / "profile"
+            profile.mkdir()
+            (profile / "marker").write_text("fixture", encoding="utf-8")
+            batch = tmp_path / "refs.txt"
+            batch.write_text("10.1109/example\n", encoding="utf-8")
+            page_meta = {
+                "doi": "10.1109/example",
+                "title": "An Accurate IEEE Paper Title",
+                "year": 2025,
+                "first_author": "Zhang",
+                "source_id": "1",
+            }
+
+            def fake_fetch(items, **kwargs):
+                provisional = Path(items[0]["dest"])
+                provisional.write_bytes(b"%PDF-1.7\ninstitutional")
+                return [{
+                    "idx": items[0]["idx"],
+                    "success": True,
+                    "source": "institutional",
+                    "file": str(provisional),
+                    "pdf_url": "https://ieeexplore.ieee.org/stampPDF/final.pdf",
+                    "meta": page_meta,
+                }]
+
+            argv = [
+                "oa_fetch.py",
+                "--batch",
+                str(batch),
+                "--out",
+                str(out),
+                "--institutional",
+                "--browser-profile",
+                str(profile),
+                "--oa-delay",
+                "0",
+            ]
+            failure = {
+                "success": False,
+                "status": "failed",
+                "meta": {"doi": "10.1109/example"},
+                "error": "no_open_access_pdf_downloaded",
+            }
+            stdout = StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(oa_fetch, "resolve_item", return_value=failure),
+                mock.patch.object(institutional_fetch, "fetch_batch", side_effect=fake_fetch),
+                redirect_stdout(stdout),
+                redirect_stderr(StringIO()),
+            ):
+                self.assertEqual(oa_fetch.main(), 0)
+
+            payload = __import__("json").loads(stdout.getvalue())
+            result = payload["results"][0]
+            final_path = Path(result["file"])
+            expected_name = oa_fetch.metadata_filename(
+                page_meta,
+                page_meta["title"],
+                "doi:10.1109/example",
+            )
+            state = __import__("json").loads(
+                (out / "oa_fetch_state.json").read_text(encoding="utf-8")
+            )
+            final_exists = final_path.is_file()
+
+        self.assertEqual(final_path.name, expected_name)
+        self.assertTrue(final_path.name.startswith("2025_Zhang_An_Accurate_IEEE_Paper_Title"))
+        self.assertTrue(final_exists)
+        self.assertEqual(result["meta"]["title"], page_meta["title"])
+        self.assertEqual(state["records"]["doi:10.1109/example"]["file"], expected_name)
+
     def test_dry_run_never_enters_institutional_retry(self):
         with TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"

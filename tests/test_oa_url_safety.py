@@ -71,7 +71,9 @@ class OaUrlSafetyTests(unittest.TestCase):
                 {},
                 "http://127.0.0.1/private.pdf",
             )
-        raised.exception.close()
+        # The explicitly raised policy error has no response body to close.
+        if raised.exception.fp is not None:
+            raised.exception.fp.close()
 
     def test_output_directory_error_returns_four(self):
         with TemporaryDirectory() as tmp:

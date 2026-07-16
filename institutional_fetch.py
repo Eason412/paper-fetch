@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urljoin, urlparse
 
+import manifest as manifest_tools
 import store
 
 MAX_PDF_BYTES = 80 * 1024 * 1024
@@ -193,8 +194,59 @@ def _meta(item: dict) -> dict:
     return {
         "doi": item.get("doi"),
         "title": item.get("title"),
+        "year": item.get("year"),
+        "first_author": item.get("first_author"),
         "source_id": item.get("id"),
+        "url": item.get("url"),
     }
+
+
+def _citation_value(page, *names: str) -> str | None:
+    for name in names:
+        try:
+            value = page.get_attribute(
+                f'meta[name="{name}"]', "content", timeout=3000
+            )
+        except Exception:
+            value = None
+        value = re.sub(r"\s+", " ", str(value or "")).strip()
+        if value:
+            return value
+    return None
+
+
+def _first_author_family(name: str | None) -> str | None:
+    value = re.sub(r"\s+", " ", str(name or "")).strip()
+    if not value:
+        return None
+    if "," in value:
+        return value.split(",", 1)[0].strip() or None
+    return value.split()[-1] or None
+
+
+def _citation_metadata(page, item: dict) -> dict:
+    """Read publisher citation tags without making metadata a download gate."""
+    meta = {key: value for key, value in _meta(item).items() if value not in (None, "")}
+    title = _citation_value(page, "citation_title")
+    author = _first_author_family(_citation_value(page, "citation_author"))
+    date = _citation_value(page, "citation_publication_date", "citation_date")
+    year_match = re.search(r"(?<!\d)(?:18|19|20|21)\d{2}(?!\d)", date or "")
+    page_doi = manifest_tools.normalize_doi(_citation_value(page, "citation_doi"))
+
+    # The publisher page is authoritative for bibliographic display fields.
+    if title:
+        meta["title"] = title
+    if author:
+        meta["first_author"] = author
+    if year_match:
+        meta["year"] = int(year_match.group(0))
+    if page_doi:
+        input_doi = manifest_tools.normalize_doi(meta.get("doi"))
+        if not input_doi:
+            meta["doi"] = page_doi
+        elif input_doi != page_doi:
+            meta["metadata_conflicts"] = {"citation_doi": page_doi}
+    return meta
 
 
 def _pdf_url_from_page(
@@ -296,7 +348,8 @@ def fetch_batch(
 ) -> list[dict]:
     """Fetch entitled PDFs for `items` through the logged-in browser session.
 
-    Each item: {id, doi, title, url, dest, idx}. `dest` is the target PDF path;
+    Each item: {id, doi, title, year, first_author, url, dest, idx}. `dest` is
+    the provisional PDF path;
     `idx` (if present) is echoed back so callers can merge with prior results.
     """
     validate_institutional_options(delay, jitter, max_items)
@@ -343,9 +396,13 @@ def fetch_batch(
                         results.append({**base, "success": False,
                                         "error": "publisher_not_allowed"})
                     else:
-                        pdf_url, pdf_error = _pdf_url_from_page(page, doi, publisher)
+                        page_base = {**base, "meta": _citation_metadata(page, item)}
+                        resolved_doi = page_base["meta"].get("doi") or doi
+                        pdf_url, pdf_error = _pdf_url_from_page(
+                            page, resolved_doi, publisher
+                        )
                         if not pdf_url:
-                            results.append({**base, "success": False,
+                            results.append({**page_base, "success": False,
                                             "error": pdf_error or "no_pdf_link_found"})
                         else:
                             ok, reason = _download(
@@ -353,7 +410,7 @@ def fetch_batch(
                             )
                             if ok:
                                 consecutive_blocks = 0
-                                results.append({**base, "success": True,
+                                results.append({**page_base, "success": True,
                                                 "source": "institutional",
                                                 "pdf_url": pdf_url, "file": str(dest)})
                             else:
@@ -361,7 +418,7 @@ def fetch_batch(
                                     consecutive_blocks += 1
                                 else:
                                     consecutive_blocks = 0
-                                results.append({**base, "success": False,
+                                results.append({**page_base, "success": False,
                                                 "pdf_url": pdf_url, "error": reason})
                 except Exception as exc:
                     results.append({**base, "success": False,

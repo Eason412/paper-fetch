@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable
 
 
 STATE_VERSION = 1
+NAMING_VERSION = 1
 STATE_FILENAME = "oa_fetch_state.json"
 PENDING_FILENAME = "oa_fetch_pending.csv"
 MAX_FILENAME_BYTES = 240
@@ -90,6 +91,71 @@ def verify_pdf(path: Path) -> bool:
             return handle.read(4) == b"%PDF"
     except OSError:
         return False
+
+
+def prepare_pdf_migration(source: Path, target: Path) -> None:
+    """Create a verified, non-overwriting hard link at ``target``.
+
+    The original remains in place until the caller has durably updated state.
+    A pre-existing target is accepted only when it is already the same file,
+    which also makes interrupted migrations safe to resume.
+    """
+    source = Path(source)
+    target = Path(target)
+    if source == target:
+        return
+    if not verify_pdf(source):
+        raise OSError(f"migration source is not a valid PDF: {source}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or target.is_symlink():
+        try:
+            same_file = source.samefile(target)
+        except OSError:
+            same_file = False
+        if same_file and verify_pdf(target):
+            return
+        raise FileExistsError(f"refusing to overwrite existing target: {target}")
+    try:
+        os.link(source, target)
+        if not verify_pdf(target):
+            raise OSError(f"migration target is not a valid PDF: {target}")
+    except Exception:
+        try:
+            if target.exists() and source.exists() and source.samefile(target):
+                target.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def finish_pdf_migration(source: Path, target: Path) -> None:
+    """Remove the old name after state points at the verified new name."""
+    source = Path(source)
+    target = Path(target)
+    if source == target or not source.exists():
+        return
+    if not verify_pdf(source) or not verify_pdf(target):
+        raise OSError("cannot finish migration without two valid PDF links")
+    try:
+        same_file = source.samefile(target)
+    except OSError as exc:
+        raise OSError("cannot verify PDF migration identity") from exc
+    if not same_file:
+        raise OSError("refusing to unlink a migration source with different content")
+    source.unlink()
+
+
+def rollback_pdf_migration(source: Path, target: Path) -> None:
+    """Discard the new link after a failed state write, preserving ``source``."""
+    source = Path(source)
+    target = Path(target)
+    if source == target or not target.exists() or not source.exists():
+        return
+    try:
+        if source.samefile(target):
+            target.unlink()
+    except OSError:
+        return
 
 
 def _clean_stem(text: str) -> str:
@@ -180,6 +246,13 @@ def record_result(state: dict, item: dict, result: dict) -> None:
         "downloaded" if result.get("success") else "failed"
     )
     record["source"] = result.get("source")
+    meta = result.get("meta") or {}
+    record["meta"] = {
+        key: meta.get(key)
+        for key in ("title", "doi", "year", "first_author", "source_id", "url")
+        if meta.get(key) not in (None, "")
+    }
+    record["naming_version"] = NAMING_VERSION
     record["runs"].append(
         {
             "at": utc_now(),

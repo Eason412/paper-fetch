@@ -15,13 +15,16 @@ import institutional_fetch  # noqa: E402
 
 
 class FakePage:
-    def __init__(self, page_url, citation_url=None):
+    def __init__(self, page_url, citation_url=None, metadata=None):
         self.url = page_url
         self.citation_url = citation_url
+        self.metadata = metadata or {}
 
     def get_attribute(self, selector, attribute, timeout):
         self.last_meta_request = (selector, attribute, timeout)
-        return self.citation_url
+        if selector == 'meta[name="citation_pdf_url"]':
+            return self.citation_url
+        return self.metadata.get(selector)
 
 
 class FakeRequest:
@@ -95,6 +98,65 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         pdf_url, error = institutional_fetch._pdf_url_from_page(page, None, "ieee")
         self.assertEqual(pdf_url, page.citation_url)
         self.assertIsNone(error)
+
+    def test_three_publishers_share_accurate_citation_metadata_contract(self):
+        pages = (
+            "https://ieeexplore.ieee.org/document/123",
+            "https://www.sciencedirect.com/science/article/pii/S123",
+            "https://onlinelibrary.wiley.com/doi/10.1002/example",
+        )
+        metadata = {
+            'meta[name="citation_title"]': "  A Canonical   Paper Title ",
+            'meta[name="citation_author"]': "Smith, Jane",
+            'meta[name="citation_publication_date"]': "2024/03/02",
+            'meta[name="citation_doi"]': "https://doi.org/10.1000/Example",
+        }
+        for page_url in pages:
+            with self.subTest(page_url=page_url):
+                meta = institutional_fetch._citation_metadata(
+                    FakePage(page_url, metadata=metadata),
+                    {"id": "ref-1", "url": page_url},
+                )
+                self.assertEqual(meta["title"], "A Canonical Paper Title")
+                self.assertEqual(meta["first_author"], "Smith")
+                self.assertEqual(meta["year"], 2024)
+                self.assertEqual(meta["doi"], "10.1000/example")
+
+    def test_citation_doi_conflict_preserves_input_identity(self):
+        page = FakePage(
+            "https://ieeexplore.ieee.org/document/123",
+            metadata={
+                'meta[name="citation_doi"]': "10.1000/page",
+                'meta[name="citation_title"]': "Publisher title",
+            },
+        )
+        meta = institutional_fetch._citation_metadata(
+            page,
+            {"doi": "10.1000/input", "title": "Input title"},
+        )
+
+        self.assertEqual(meta["doi"], "10.1000/input")
+        self.assertEqual(meta["title"], "Publisher title")
+        self.assertEqual(meta["metadata_conflicts"]["citation_doi"], "10.1000/page")
+
+    def test_missing_or_broken_citation_tags_do_not_block_fallback_metadata(self):
+        class BrokenPage:
+            def get_attribute(self, *args, **kwargs):
+                raise RuntimeError("challenge page")
+
+        meta = institutional_fetch._citation_metadata(
+            BrokenPage(),
+            {
+                "doi": "10.1000/input",
+                "title": "Known title",
+                "year": 2023,
+                "first_author": "Known",
+            },
+        )
+
+        self.assertEqual(meta["title"], "Known title")
+        self.assertEqual(meta["year"], 2023)
+        self.assertEqual(meta["first_author"], "Known")
 
     def test_download_guard_blocks_an_unsupported_host_before_request(self):
         ctx = FakeContext()

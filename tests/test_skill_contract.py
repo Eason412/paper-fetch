@@ -20,6 +20,9 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("manifest", text.lower())
         self.assertIn("Do not invent", text)
         self.assertIn("pending", text.lower())
+        self.assertIn("citation_title", text)
+        self.assertIn("renamed_from", text)
+        self.assertIn("filename_error", text)
 
 
 if __name__ == "__main__":
