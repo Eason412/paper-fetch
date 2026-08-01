@@ -9,6 +9,11 @@ This is the canonical maintenance manual for AI agents changing the repository.
 It is not the paper-download workflow itself. For a user request to find or
 download papers, read the root `SKILL.md` completely and follow it.
 
+Claude Code loads ancestor `CLAUDE.md` files additively. Treat unrelated
+ancestor-project facts as out of scope for this repository. If an inherited
+instruction conflicts with this repository-local contract and cannot be
+reconciled safely, stop and report the conflict instead of mixing projects.
+
 ## Document roles and authority
 
 Keep each document in one role:
@@ -41,6 +46,7 @@ line-for-line, but commands, numbers, paths, and behavior must match.
 | `manifest.py` | `id,title,doi,url` normalization, validation, hard DOI/URL deduplication, possible title duplicates, canonical identity, and manifest hash. |
 | `config.py` | Non-sensitive preference whitelist, defaults, validation, precedence, permissions, and atomic persistence. |
 | `store.py` | Atomic writes, `%PDF` validation, collision-safe filenames, hard-link migration, state, and pending manifests. |
+| `requirements.txt` | Optional institutional-browser dependency only; the OA layer must remain standard-library-only. |
 | `agents/openai.yaml` | Codex Skill UI metadata and implicit-invocation setting only. |
 | `tests/` | Behavioral, safety, orchestration, storage, and Skill/document contract evidence. |
 
@@ -91,6 +97,9 @@ dependency used only for institutional access.
   automate credential fields, CAPTCHA, paywall bypass, anti-bot evasion, proxy
   rotation, or shared credentials.
 - Do not use Sci-Hub or any source that bypasses access controls.
+- Skill discovery or implicit invocation is not permission to install
+  dependencies, change saved preferences, broaden publisher access, or handle
+  credentials. Preserve the authorization rules in the root `SKILL.md`.
 - A previous successful login is not proof that the session is still valid.
   Preserve `profile_missing_login_required` and `login_refresh_required` as
   explicit pending states.
@@ -103,9 +112,9 @@ dependency used only for institutional access.
 - Never automatically start another institutional batch to work around the cap.
 - Preserve the stop after three HTTP 4xx/challenge/login-wall responses since
   the last successful institutional PDF.
-- Keep OA URL SSRF checks, redirect revalidation, standard-port restrictions,
-  same-publisher institutional PDF checks, the 80 MiB limit, and `%PDF`
-  signature validation.
+- Keep OA URL SSRF checks, redirect revalidation, and OA standard-port
+  restrictions. Keep same-publisher institutional PDF checks, the 80 MiB
+  limit, and `%PDF` signature validation.
 
 ### Storage and recovery
 
@@ -120,6 +129,26 @@ dependency used only for institutional access.
   `duplicate`, `failed`, and `pending` distinct in code, reports, docs, and
   handoff messages.
 
+### CLI, input, and result contracts
+
+- Preserve the mutually exclusive paper selectors `--doi`, `--title`, `--url`,
+  and `--batch`. `--manifest-out` requires `--batch`; outside help and version,
+  login and standalone config saves remain the only selector-free operational
+  modes.
+- Keep Markdown, CSV, and one-item-per-line text parsing auditable. Invalid
+  rows remain represented with a validation reason, while only executable rows
+  enter download orchestration. Do not silently repair missing identifiers.
+- Paper runs that reach final reporting, manifest-preflight runs, and
+  successful standalone config saves write JSON to stdout. `--format text`
+  adds progress to stderr. Help, version, visible login, argument errors, and
+  early failures may use human-readable output instead.
+- Preserve exit meanings: `0` successful special mode, resolved work, or usable
+  preflight; `1` failed/pending; `2` invalid CLI/config; `3` missing/empty input
+  or unusable preflight; and `4` transport or persistence failure.
+- A dry run may query candidates and write the normalized manifest and result
+  reports, but it must not write a PDF, state, or pending manifest and must not
+  enter institutional fallback. `candidate` remains evidence, not a download.
+
 ## Change-coupling matrix
 
 Every behavior change must update its evidence and public contracts:
@@ -131,9 +160,12 @@ Every behavior change must update its evidence and public contracts:
 | Publisher allowlist, landing/PDF URL rules, citation metadata | `institutional_fetch.py`; `tests/test_institutional_boundaries.py`; `tests/test_oa_url_safety.py`; `SKILL.md` and both READMEs. |
 | Config key, default, range, or precedence | `config.py`; `tests/test_config.py`; config tables in `SKILL.md` and both READMEs. |
 | Manifest fields, validation, deduplication, canonical identity | `manifest.py`; `tests/test_manifest.py`; manifest instructions in `SKILL.md` and both READMEs. |
+| CLI selectors, batch parsing, manifest-only mode, dry-run, stdout/stderr, exit codes | `oa_fetch.py` and `manifest.py` when applicable; focused CLI/orchestration tests; `SKILL.md` and both READMEs for user-visible changes. |
 | Filename, atomic write, state, migration, or pending schema | `store.py` and relevant `oa_fetch.py` paths; `tests/test_store_resume.py`; `tests/test_filename_metadata.py`; both READMEs and `SKILL.md` when agent behavior changes. |
 | Report field, status, pending reason, or exit code | `oa_fetch.py`; orchestration/report tests; result sections in `SKILL.md` and both READMEs. |
-| Codex UI metadata or Claude project wrapper | `agents/openai.yaml` or `.claude/skills/oa-paper-fetch/SKILL.md`; `tests/test_skill_contract.py`. |
+| Python minimum, dependency, or install flow | `requirements.txt`; import boundaries; both READMEs; `SKILL.md` when execution changes; tests proving OA does not require Playwright. |
+| CLI version | `oa_fetch.py` `VERSION`; `--version`; both README version statements; document-contract tests. |
+| Codex UI metadata or Claude project wrapper | `agents/openai.yaml` or `.claude/skills/oa-paper-fetch/SKILL.md`; `tests/test_skill_contract.py`; confirm implicit invocation does not create new authorization. |
 | Human documentation structure | Both READMEs, language links, repository maps, and `tests/test_skill_contract.py`. |
 | AI maintenance policy | `AGENTS.md`; keep `CLAUDE.md` a thin pointer. |
 
@@ -148,7 +180,9 @@ Do not update one README and leave the other stale.
 3. State the intended behavior, write or update a regression test, and confirm
    the test fails for the intended reason when practical.
 4. Make the smallest implementation change that satisfies the contract.
-5. Update every affected source-of-truth and both human READMEs.
+5. Update every affected source-of-truth. Update both human READMEs together
+   when the user-visible contract, default, dependency, status, output, safety
+   rule, or limitation changes; do not churn them for internal-only refactors.
 6. Run proportional verification and inspect the final diff.
 7. Report code, test, live-network, login, commit, and push states separately.
 
@@ -199,6 +233,13 @@ Never add these to source control or AI prompts:
   `oa_fetch_manifest.csv`, `oa_fetch_pending.csv`, logs, caches,
   `__pycache__`, or virtual environments.
 
+The ignored repository-local `pdfs/` directory is local run output, not a
+fixture or source directory. Do not inspect or delete it unless the current
+task explicitly places it in scope. Interrupted atomic writes can leave
+`*.part-*` files beside their intended target; remove only leftovers
+attributable to the current task, and never treat them as source or delete
+unrelated user output.
+
 Use sanitized placeholders in tests and documentation. Do not add screenshots
 of institutional pages unless the user explicitly requests diagnostics and
 understands that campus or account information may be visible.
@@ -218,5 +259,7 @@ A change is complete only when:
 - `git diff --check` is clean;
 - the handoff distinguishes uncommitted, committed, pushed, live-OA-tested, and
   institutional-session-tested states.
+- when entrypoint or metadata files change, the handoff also distinguishes a
+  repository edit from an installed-copy update and fresh-session discovery.
 
 Do not commit or push unless the user explicitly asks.

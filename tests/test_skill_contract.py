@@ -96,6 +96,12 @@ class SkillContractTests(unittest.TestCase):
             "Never inspect the contents of `~/.oa-paper-fetch/profile`",
             "Do not commit or push unless the user explicitly asks",
             "publisher_title_unverifiable",
+            "CLI, input, and result contracts",
+            "--manifest-out",
+            "A dry run",
+            "requirements.txt",
+            "implicit invocation",
+            "ancestor `CLAUDE.md`",
         ):
             self.assertIn(token, agents)
 
@@ -103,7 +109,11 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("canonical AI development and maintenance", claude)
         self.assertIn("read the root `SKILL.md`", claude)
         self.assertIn("update both `README.md` and `README.zh-CN.md`", claude)
-        self.assertLess(len(claude.splitlines()), 40)
+        self.assertIn("/context", claude)
+        self.assertIn("personal Skill named `oa-paper-fetch`", claude)
+        self.assertIn("python3 oa_fetch.py --help", claude)
+        self.assertIn("python3 oa_fetch.py --version", claude)
+        self.assertLess(len(claude.splitlines()), 50)
         self.assertNotIn("inst_delay", claude)
         self.assertNotIn("publisher_title_mismatch", claude)
 
