@@ -41,6 +41,17 @@ class FakeContext:
         self.request = FakeRequest()
 
 
+class GuardablePage:
+    main_frame = object()
+
+    def route(self, pattern, handler):
+        self.route_pattern = pattern
+        self.route_handler = handler
+
+    def unroute(self, pattern, handler):
+        self.unroute_call = (pattern, handler)
+
+
 class InstitutionalBoundaryTests(unittest.TestCase):
     def test_publisher_title_evidence_normalizes_punctuation_and_case(self):
         evidence = institutional_fetch._publisher_title_evidence(
@@ -102,6 +113,70 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         for url in rejected:
             with self.subTest(url=url):
                 self.assertFalse(institutional_fetch._allowed_landing_url(url))
+
+    def test_landing_redirect_guard_aborts_before_crossing_the_allowlist(self):
+        class Page(GuardablePage):
+            url = "https://doi.org/10.1109/example"
+
+            def __init__(self):
+                self.redirect_route = None
+
+            def goto(self, *args, **kwargs):
+                request = mock.Mock()
+                request.url = "http://127.0.0.1/private"
+                request.frame = self.main_frame
+                request.is_navigation_request.return_value = True
+                route = mock.Mock()
+                self.route_handler(route, request)
+                self.redirect_route = route
+                if route.abort.called:
+                    raise RuntimeError("redirect blocked")
+                self.url = request.url
+
+            def close(self):
+                return None
+
+        class PlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        page = Page()
+        context = mock.Mock()
+        context.new_page.return_value = page
+        with TemporaryDirectory() as tmp:
+            item = {
+                "idx": 0,
+                "doi": "10.1109/example",
+                "dest": str(Path(tmp) / "paper.pdf"),
+            }
+            with (
+                mock.patch.object(
+                    institutional_fetch,
+                    "_load_playwright",
+                    return_value=lambda: PlaywrightManager(),
+                ),
+                mock.patch.object(institutional_fetch, "_launch", return_value=context),
+                redirect_stdout(StringIO()),
+            ):
+                results = institutional_fetch.fetch_batch(
+                    [item],
+                    profile_dir=str(Path(tmp) / "profile"),
+                    delay=4,
+                    jitter=0,
+                )
+
+        page.redirect_route.abort.assert_called_once()
+        page.redirect_route.continue_.assert_not_called()
+        self.assertEqual(results[0]["error"], "unsafe_landing_redirect")
+
+    def test_landing_login_wall_detection_requires_missing_citation_identity(self):
+        page = mock.Mock()
+        page.evaluate.return_value = "Sign in to continue"
+
+        self.assertTrue(institutional_fetch._page_has_login_or_challenge(page))
 
     def test_citation_pdf_must_belong_to_the_same_supported_publisher(self):
         page = FakePage(
@@ -184,7 +259,7 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        class Page:
+        class Page(GuardablePage):
             url = "https://ieeexplore.ieee.org/document/123"
 
             def goto(self, *args, **kwargs):
@@ -258,7 +333,7 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        class Page:
+        class Page(GuardablePage):
             url = "https://ieeexplore.ieee.org/document/123"
 
             def __init__(self, citation_title):
@@ -345,7 +420,7 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        class Page:
+        class Page(GuardablePage):
             url = "https://ieeexplore.ieee.org/document/123"
 
             def goto(self, *args, **kwargs):
@@ -633,7 +708,7 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, tb):
                 return False
 
-        class Page:
+        class Page(GuardablePage):
             url = "https://ieeexplore.ieee.org/document/1"
 
             def goto(self, *args, **kwargs):
@@ -705,6 +780,153 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         self.assertEqual(download.call_count, 4)
         self.assertEqual(results[-1]["idx"], 4)
         self.assertEqual(results[-1]["error"], "aborted_after_repeated_blocks")
+
+    def test_landing_http_4xx_responses_trigger_the_block_streak(self):
+        class PlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class Response:
+            status = 403
+
+        class Page(GuardablePage):
+            url = "https://ieeexplore.ieee.org/document/1"
+
+            def goto(self, *args, **kwargs):
+                return Response()
+
+            def wait_for_timeout(self, milliseconds):
+                return None
+
+            def close(self):
+                return None
+
+        class Context:
+            def __init__(self):
+                self.pages = []
+
+            def new_page(self):
+                page = Page()
+                self.pages.append(page)
+                return page
+
+            def close(self):
+                return None
+
+        context = Context()
+        with TemporaryDirectory() as tmp:
+            items = [
+                {
+                    "idx": index,
+                    "doi": f"10.1109/{index}",
+                    "dest": str(Path(tmp) / f"paper-{index}.pdf"),
+                }
+                for index in range(5)
+            ]
+            with (
+                mock.patch.object(
+                    institutional_fetch,
+                    "_load_playwright",
+                    return_value=lambda: PlaywrightManager(),
+                ),
+                mock.patch.object(institutional_fetch, "_launch", return_value=context),
+                mock.patch.object(institutional_fetch.time, "sleep"),
+                redirect_stdout(StringIO()),
+            ):
+                results = institutional_fetch.fetch_batch(
+                    items,
+                    profile_dir=str(Path(tmp) / "profile"),
+                    delay=4,
+                    jitter=0,
+                )
+
+        self.assertEqual(len(context.pages), 3)
+        self.assertEqual([result["error"] for result in results[:3]], ["http_403"] * 3)
+        self.assertEqual(
+            [result["error"] for result in results[3:]],
+            ["aborted_after_repeated_blocks"] * 2,
+        )
+
+    def test_landing_login_walls_trigger_the_block_streak(self):
+        class PlaywrightManager:
+            def __enter__(self):
+                return object()
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        class Response:
+            status = 200
+
+        class Page(GuardablePage):
+            url = "https://ieeexplore.ieee.org/document/1"
+
+            def goto(self, *args, **kwargs):
+                return Response()
+
+            def wait_for_timeout(self, milliseconds):
+                return None
+
+            def get_attribute(self, selector, attribute, timeout):
+                return None
+
+            def evaluate(self, expression):
+                return "Institutional access: Sign in to continue"
+
+            def close(self):
+                return None
+
+        class Context:
+            def __init__(self):
+                self.pages = []
+
+            def new_page(self):
+                page = Page()
+                self.pages.append(page)
+                return page
+
+            def close(self):
+                return None
+
+        context = Context()
+        with TemporaryDirectory() as tmp:
+            items = [
+                {
+                    "idx": index,
+                    "doi": f"10.1109/{index}",
+                    "dest": str(Path(tmp) / f"paper-{index}.pdf"),
+                }
+                for index in range(5)
+            ]
+            with (
+                mock.patch.object(
+                    institutional_fetch,
+                    "_load_playwright",
+                    return_value=lambda: PlaywrightManager(),
+                ),
+                mock.patch.object(institutional_fetch, "_launch", return_value=context),
+                mock.patch.object(institutional_fetch.time, "sleep"),
+                redirect_stdout(StringIO()),
+            ):
+                results = institutional_fetch.fetch_batch(
+                    items,
+                    profile_dir=str(Path(tmp) / "profile"),
+                    delay=4,
+                    jitter=0,
+                )
+
+        self.assertEqual(len(context.pages), 3)
+        self.assertEqual(
+            [result["error"] for result in results[:3]],
+            ["landing_login_or_challenge"] * 3,
+        )
+        self.assertEqual(
+            [result["error"] for result in results[3:]],
+            ["aborted_after_repeated_blocks"] * 2,
+        )
 
 
 if __name__ == "__main__":

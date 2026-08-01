@@ -407,6 +407,61 @@ class OaFirstTests(unittest.TestCase):
         )
         self.assertIn("pending", payload["reports"])
 
+    def test_landing_login_wall_becomes_pending_for_visible_refresh(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out = tmp_path / "out"
+            profile = tmp_path / "profile"
+            profile.mkdir()
+            (profile / "marker").write_text("fixture", encoding="utf-8")
+            argv = [
+                "oa_fetch.py",
+                "--doi",
+                "10.1109/failure",
+                "--out",
+                str(out),
+                "--institutional",
+                "--browser-profile",
+                str(profile),
+                "--oa-delay",
+                "0",
+            ]
+            oa_result = {
+                "success": False,
+                "status": "failed",
+                "meta": {"doi": "10.1109/failure"},
+                "error": "no_open_access_pdf_downloaded",
+            }
+            institutional_result = {
+                "idx": 0,
+                "success": False,
+                "error": "landing_login_or_challenge",
+            }
+            stdout = StringIO()
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(oa_fetch, "resolve_item", return_value=oa_result),
+                mock.patch.object(
+                    institutional_fetch,
+                    "fetch_batch",
+                    return_value=[institutional_result],
+                ),
+                redirect_stdout(stdout),
+                redirect_stderr(StringIO()),
+            ):
+                exit_code = oa_fetch.main()
+
+            payload = __import__("json").loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 1)
+        result = payload["results"][0]
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["pending_reason"], "login_refresh_required")
+        self.assertEqual(
+            result["institutional"]["error"],
+            "landing_login_or_challenge",
+        )
+
     def test_oa_delay_is_applied_only_between_resolved_items(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

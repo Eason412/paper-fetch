@@ -34,6 +34,15 @@ MIN_INSTITUTIONAL_DELAY = 4.0
 MAX_INSTITUTIONAL_JITTER = 10.0
 MAX_INSTITUTIONAL_ITEMS = 30
 DOI_HOSTS = {"doi.org", "dx.doi.org"}
+LOGIN_OR_CHALLENGE_MARKERS = (
+    "sign in",
+    "log in",
+    "login",
+    "single sign-on",
+    "captcha",
+    "verify you are human",
+    "access denied",
+)
 
 # Base URLs opened during `login` so the user can SSO into each publisher once.
 PUBLISHERS = {
@@ -100,6 +109,65 @@ def _allowed_landing_url(url: str) -> bool:
     return (
         parsed.scheme == "https"
         and (host in DOI_HOSTS or _publisher_from_url(url) is not None)
+    )
+
+
+def _guarded_landing_goto(page, url: str, timeout: int):
+    blocked_targets: list[str] = []
+    main_frame = page.main_frame
+
+    def guard_navigation(route, request):
+        if (
+            request.is_navigation_request()
+            and request.frame == main_frame
+            and not _allowed_landing_url(request.url)
+        ):
+            blocked_targets.append(request.url)
+            route.abort("blockedbyclient")
+            return
+        route.continue_()
+
+    page.route("**/*", guard_navigation)
+    try:
+        try:
+            response = page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=timeout * 1000,
+            )
+        except Exception:
+            if blocked_targets:
+                return None, "unsafe_landing_redirect"
+            raise
+        return response, None
+    finally:
+        page.unroute("**/*", guard_navigation)
+
+
+def _page_has_login_or_challenge(page) -> bool:
+    try:
+        body_text = page.evaluate(
+            "() => (document.body?.innerText || '').slice(0, 65536)"
+        )
+    except Exception:
+        return False
+    sample = str(body_text or "").casefold()
+    return any(marker in sample for marker in LOGIN_OR_CHALLENGE_MARKERS)
+
+
+def _response_error(response) -> str | None:
+    status = getattr(response, "status", None)
+    if isinstance(status, int) and 400 <= status <= 599:
+        return f"http_{status}"
+    return None
+
+
+def _counts_as_block(reason: str | None) -> bool:
+    value = str(reason or "")
+    return (
+        value.startswith("http_4")
+        or "challenge" in value
+        or value == "unsafe_landing_redirect"
     )
 
 
@@ -358,16 +426,7 @@ def _download(
         return False, f"read_{type(exc).__name__}"
     if not body.startswith(b"%PDF"):
         sample = body[:65536].lower()
-        login_or_challenge_markers = (
-            b"sign in",
-            b"log in",
-            b"login",
-            b"single sign-on",
-            b"captcha",
-            b"verify you are human",
-            b"access denied",
-        )
-        if any(marker in sample for marker in login_or_challenge_markers):
+        if any(marker.encode() in sample for marker in LOGIN_OR_CHALLENGE_MARKERS):
             return False, "not_pdf_login_or_challenge"
         return False, "not_pdf"
     if len(body) > MAX_PDF_BYTES:
@@ -375,6 +434,82 @@ def _download(
     dest.parent.mkdir(parents=True, exist_ok=True)
     store.atomic_write_bytes(dest, body)
     return True, "downloaded"
+
+
+def _fetch_page_pdf(
+    ctx,
+    page,
+    item: dict,
+    base: dict,
+    landing: str,
+    dest: Path,
+    doi: str | None,
+    timeout: int,
+) -> tuple[dict, bool]:
+    response, landing_error = _guarded_landing_goto(page, landing, timeout)
+    if landing_error:
+        return (
+            {**base, "success": False, "error": landing_error},
+            _counts_as_block(landing_error),
+        )
+
+    response_error = _response_error(response)
+    if response_error:
+        return (
+            {**base, "success": False, "error": response_error},
+            _counts_as_block(response_error),
+        )
+
+    page.wait_for_timeout(1500)
+    publisher = _publisher_from_url(page.url)
+    if not publisher:
+        return {**base, "success": False, "error": "publisher_not_allowed"}, False
+
+    page_base = {**base, "meta": _citation_metadata(page, item)}
+    if (
+        not page_base["meta"].get("citation_title")
+        and _page_has_login_or_challenge(page)
+    ):
+        reason = "landing_login_or_challenge"
+        return {**page_base, "success": False, "error": reason}, True
+
+    title_match = page_base["meta"].get("publisher_title_match")
+    if page_base["meta"].get("expected_title") and title_match is not True:
+        title_error = (
+            "publisher_title_mismatch"
+            if title_match is False
+            else "publisher_title_unverifiable"
+        )
+        return {**page_base, "success": False, "error": title_error}, False
+
+    resolved_doi = page_base["meta"].get("doi") or doi
+    pdf_url, pdf_error = _pdf_url_from_page(page, resolved_doi, publisher)
+    if not pdf_url:
+        return (
+            {
+                **page_base,
+                "success": False,
+                "error": pdf_error or "no_pdf_link_found",
+            },
+            False,
+        )
+
+    ok, reason = _download(ctx, pdf_url, dest, timeout, publisher=publisher)
+    if ok:
+        return (
+            {
+                **page_base,
+                "success": True,
+                "source": "institutional",
+                "pdf_url": pdf_url,
+                "file": str(dest),
+            },
+            False,
+        )
+    return (
+        {**page_base, "success": False, "pdf_url": pdf_url, "error": reason},
+        _counts_as_block(reason),
+    )
 
 
 def fetch_batch(
@@ -431,53 +566,21 @@ def fetch_batch(
                 print(f"[institutional {i}/{len(capped)}] {label}")
                 page = ctx.new_page()
                 try:
-                    page.goto(landing, wait_until="domcontentloaded", timeout=timeout * 1000)
-                    page.wait_for_timeout(1500)
-                    publisher = _publisher_from_url(page.url)
-                    if not publisher:
-                        results.append({**base, "success": False,
-                                        "error": "publisher_not_allowed"})
-                    else:
-                        page_base = {**base, "meta": _citation_metadata(page, item)}
-                        title_match = page_base["meta"].get(
-                            "publisher_title_match"
-                        )
-                        if (
-                            page_base["meta"].get("expected_title")
-                            and title_match is not True
-                        ):
-                            title_error = (
-                                "publisher_title_mismatch"
-                                if title_match is False
-                                else "publisher_title_unverifiable"
-                            )
-                            results.append({
-                                **page_base,
-                                "success": False,
-                                "error": title_error,
-                            })
-                        else:
-                            resolved_doi = page_base["meta"].get("doi") or doi
-                            pdf_url, pdf_error = _pdf_url_from_page(
-                                page, resolved_doi, publisher
-                            )
-                            if not pdf_url:
-                                results.append({**page_base, "success": False,
-                                                "error": pdf_error or "no_pdf_link_found"})
-                            else:
-                                ok, reason = _download(
-                                    ctx, pdf_url, dest, timeout, publisher=publisher
-                                )
-                                if ok:
-                                    consecutive_blocks = 0
-                                    results.append({**page_base, "success": True,
-                                                    "source": "institutional",
-                                                    "pdf_url": pdf_url, "file": str(dest)})
-                                else:
-                                    if reason.startswith("http_4") or "challenge" in reason:
-                                        consecutive_blocks += 1
-                                    results.append({**page_base, "success": False,
-                                                    "pdf_url": pdf_url, "error": reason})
+                    result, counts_as_block = _fetch_page_pdf(
+                        ctx,
+                        page,
+                        item,
+                        base,
+                        landing,
+                        dest,
+                        doi,
+                        timeout,
+                    )
+                    if result.get("success"):
+                        consecutive_blocks = 0
+                    elif counts_as_block:
+                        consecutive_blocks += 1
+                    results.append(result)
                 except Exception as exc:
                     results.append({**base, "success": False,
                                     "error": f"{type(exc).__name__}"})

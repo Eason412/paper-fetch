@@ -298,10 +298,13 @@ a login refresh, or was deferred by the institutional cap.
   for manual identity resolution.
 - `publisher_title_unverifiable`: do not request the PDF; retain a pending
   result because an expected title could not be checked on the publisher page.
+- `unsafe_landing_redirect`: stop that item; do not navigate to the rejected
+  target manually or expand the landing allowlist.
 - `unsafe_pdf_url`: stop that item; do not download the URL manually.
-- `not_pdf_login_or_challenge`, `profile_missing_login_required`, or repeated
-  HTTP 4xx/challenge responses: stop institutional work and request a visible
-  login refresh. Do not automate credentials or retry loops.
+- `landing_login_or_challenge`, `not_pdf_login_or_challenge`,
+  `profile_missing_login_required`, or repeated landing/PDF HTTP 4xx/challenge
+  responses: stop institutional work and request a visible login refresh. Do
+  not automate credentials or retry loops.
 - `institutional_cap_reached`: write/report pending items and wait for a new
   user request.
 - No OA or entitled PDF: retain a failed result for manual retrieval.

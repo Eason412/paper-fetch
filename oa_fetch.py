@@ -1396,6 +1396,7 @@ def main() -> int:
             pending_login_errors = {
                 "profile_missing_login_required",
                 "not_pdf_login_or_challenge",
+                "landing_login_or_challenge",
                 "aborted_after_repeated_blocks",
             }
             records_by_index = {record["input_index"]: record for record in ready}

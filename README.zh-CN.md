@@ -268,7 +268,7 @@ python3 oa_fetch.py \
 
 如果已经通过 `--save-config` 保存了 `institutional=true`，后续可省略 `--institutional`。`--headless` 只适合复用已经成功工作的 profile；首次登录和登录修复始终必须使用可见浏览器。
 
-工具不会根据上次登录时间推断会话仍有效。profile 缺失时，符合机构回退条件的记录变为 `pending/profile_missing_login_required`；出现非 PDF 登录页或 HTTP 4xx 时，该记录变为 `pending/login_refresh_required`；任务存在预期标题但出版商页面没有标题时，记录变为 `pending/publisher_title_unverifiable`，标题不一致时则变为 `pending/publisher_title_mismatch`；自上次成功 PDF 以来累计 3 次 HTTP 4xx 或 challenge 后，本轮机构阶段停止并提示重新登录。
+每次主 frame 的落地页重定向都会在请求发出前拦截，并且只能停留在 HTTPS DOI 或受支持出版商域名；越界重定向以 `unsafe_landing_redirect` 失败。工具不会根据上次登录时间推断会话仍有效。profile 缺失时，符合机构回退条件的记录变为 `pending/profile_missing_login_required`；落地页或 PDF 阶段出现登录墙，或任一阶段出现 HTTP 4xx 时，该记录变为 `pending/login_refresh_required`；任务存在预期标题但出版商页面没有标题时，记录变为 `pending/publisher_title_unverifiable`，标题不一致时则变为 `pending/publisher_title_mismatch`；自上次成功 PDF 以来在落地页或 PDF 阶段累计 3 次 HTTP 4xx 或 challenge 后，本轮机构阶段停止并提示重新登录。
 
 ### 下载节奏
 
@@ -279,7 +279,7 @@ OA 和机构阶段都串行处理：
 | OA 论文条目 | 每篇间隔 1 秒 | `--oa-delay 0–60` 秒 |
 | 机构访问 | 4 秒基础延迟 + 0–3 秒随机延迟 | 基础延迟 4–86400 秒，jitter 0–10 秒 |
 
-机构访问单次最多 30 篇。自上次成功 PDF 以来累计出现 3 次 HTTP 4xx、challenge 或登录墙后停止。超过上限或因登录问题未执行的记录写入 `oa_fetch_pending.csv`；程序不会自动启动下一批。
+机构访问单次最多 30 篇。自上次成功 PDF 以来，落地页或 PDF 阶段累计出现 3 次 HTTP 4xx、challenge 或登录墙后停止。超过上限或因登录问题未执行的记录写入 `oa_fetch_pending.csv`；程序不会自动启动下一批。
 
 ## 断点续跑
 

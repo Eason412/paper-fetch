@@ -267,7 +267,7 @@ python3 oa_fetch.py \
 
 If `institutional=true` was saved with `--save-config`, `--institutional` can be omitted. `--headless` is only for an already working profile. Initial login and login repair must remain visible.
 
-The tool does not infer that a session is valid from its age. A missing profile becomes `pending/profile_missing_login_required`. A non-PDF login page or HTTP 4xx becomes `pending/login_refresh_required`. When an expected title exists, a missing publisher title becomes `pending/publisher_title_unverifiable`, while a disagreement becomes `pending/publisher_title_mismatch`. After three HTTP 4xx or challenge responses since the last successful PDF, the institutional phase stops and requests a visible login refresh.
+Every main-frame landing redirect is intercepted before its request and must stay on HTTPS DOI or supported-publisher hosts; a cross-boundary redirect fails as `unsafe_landing_redirect`. The tool does not infer that a session is valid from its age. A missing profile becomes `pending/profile_missing_login_required`. A landing-page or PDF login wall, or an HTTP 4xx at either stage, becomes `pending/login_refresh_required`. When an expected title exists, a missing publisher title becomes `pending/publisher_title_unverifiable`, while a disagreement becomes `pending/publisher_title_mismatch`. After three landing-page or PDF HTTP 4xx/challenge responses since the last successful PDF, the institutional phase stops and requests a visible login refresh.
 
 ### Pacing
 
@@ -278,7 +278,7 @@ Both phases are serial:
 | OA paper item | 1 second between items | `--oa-delay 0–60` seconds |
 | Institutional item | 4-second base delay plus 0–3 seconds of jitter | base 4–86400 seconds, jitter 0–10 seconds |
 
-At most 30 institutional papers are attempted in one run. Three HTTP 4xx, challenge, or login-wall responses since the last successful PDF stop the phase. Overflow and login-gated work are written to `oa_fetch_pending.csv`. The program never starts another batch automatically.
+At most 30 institutional papers are attempted in one run. Three landing-page or PDF HTTP 4xx, challenge, or login-wall responses since the last successful PDF stop the phase. Overflow and login-gated work are written to `oa_fetch_pending.csv`. The program never starts another batch automatically.
 
 ## Resume an interrupted job
 
