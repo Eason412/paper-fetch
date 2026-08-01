@@ -390,7 +390,9 @@ def openalex_lookup(doi: str | None, title: str | None, timeout: int) -> dict:
     authorships = data.get("authorships") or []
     first_author = None
     if authorships:
-        first_author = ((authorships[0].get("author") or {}).get("display_name") or "").split()[-1] or None
+        first_author = _author_family(
+            (authorships[0].get("author") or {}).get("display_name")
+        )
     urls = []
     for key in ("best_oa_location", "primary_location"):
         loc = data.get(key) or {}
@@ -589,7 +591,7 @@ def semantic_scholar_lookup(doi: str, timeout: int) -> dict:
     authors = data.get("authors") or []
     first_author = None
     if authors:
-        first_author = (authors[0].get("name") or "").split()[-1] or None
+        first_author = _author_family(authors[0].get("name"))
     return {
         "title": data.get("title"),
         "year": data.get("year"),

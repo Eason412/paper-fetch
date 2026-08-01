@@ -48,6 +48,27 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(records[1]["duplicate_of"], records[0]["canonical_id"])
         self.assertEqual(records[2]["duplicate_of"], records[0]["canonical_id"])
 
+    def test_hard_dedupe_propagates_identifiers_from_duplicate_rows(self):
+        records = manifest.normalize_items(
+            [
+                {"id": "a", "title": None, "doi": None, "url": "https://example.org/paper"},
+                {
+                    "id": "b",
+                    "title": None,
+                    "doi": "10.1000/example",
+                    "url": "https://example.org/paper",
+                },
+                {"id": "c", "title": None, "doi": "10.1000/example", "url": None},
+            ]
+        )
+
+        self.assertEqual(
+            [record["manifest_status"] for record in records],
+            ["ready", "duplicate", "duplicate"],
+        )
+        self.assertEqual(records[1]["duplicate_of"], records[0]["canonical_id"])
+        self.assertEqual(records[2]["duplicate_of"], records[0]["canonical_id"])
+
     def test_title_only_matches_are_flagged_but_not_merged(self):
         records = manifest.normalize_items(
             [

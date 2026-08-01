@@ -16,6 +16,31 @@ import oa_fetch  # noqa: E402
 
 
 class OaUrlSafetyTests(unittest.TestCase):
+    def test_metadata_lookups_tolerate_empty_author_names(self):
+        openalex_response = {
+            "doi": "https://doi.org/10.1000/example",
+            "title": "Example",
+            "publication_year": 2024,
+            "authorships": [{"author": {"display_name": ""}}],
+        }
+        semantic_scholar_response = {
+            "title": "Example",
+            "year": 2024,
+            "authors": [{"name": ""}],
+        }
+
+        with mock.patch.object(oa_fetch, "request_json", return_value=openalex_response):
+            openalex = oa_fetch.openalex_lookup("10.1000/example", None, 5)
+        with mock.patch.object(
+            oa_fetch,
+            "request_json",
+            return_value=semantic_scholar_response,
+        ):
+            semantic_scholar = oa_fetch.semantic_scholar_lookup("10.1000/example", 5)
+
+        self.assertIsNone(openalex["first_author"])
+        self.assertIsNone(semantic_scholar["first_author"])
+
     def test_safe_url_rejects_local_and_legacy_numeric_hosts(self):
         rejected = (
             "http://127.0.0.1/paper.pdf",

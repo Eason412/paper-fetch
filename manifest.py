@@ -122,6 +122,10 @@ def normalize_items(items: list[dict]) -> list[dict]:
                 manifest_status="duplicate",
                 duplicate_of=duplicate_of,
             )
+            if doi:
+                seen_doi.setdefault(doi, duplicate_of)
+            if url:
+                seen_url.setdefault(url, duplicate_of)
             records.append(record)
             continue
 
