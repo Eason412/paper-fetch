@@ -775,16 +775,24 @@ def resolve_item(item: dict, out_dir: Path, timeout: int, overwrite: bool, dry_r
         return blocked
 
     if dry_run:
+        public_candidates = [
+            (source, url, metadata)
+            for source, url, metadata in candidates
+            if safe_url(url)
+        ]
         return {
-            "success": bool(candidates),
-            "status": "candidate" if candidates else "failed",
+            "success": bool(public_candidates),
+            "status": "candidate" if public_candidates else "failed",
             "dry_run": True,
-            "file": str(dest) if candidates else None,
-            "pdf_url": candidates[0][1] if candidates else None,
-            "source": candidates[0][0] if candidates else None,
+            "file": str(dest) if public_candidates else None,
+            "pdf_url": public_candidates[0][1] if public_candidates else None,
+            "source": public_candidates[0][0] if public_candidates else None,
             "meta": meta,
             "sources": sources,
-            "candidates": [{"source": s, "url": u} for s, u, _ in candidates],
+            "candidates": [
+                {"source": source, "url": url}
+                for source, url, _ in public_candidates
+            ],
             "title_resolution": title_resolution,
             **identity,
         }
@@ -1041,6 +1049,23 @@ def _summary(results: list[dict], unique_total: int) -> dict:
     for status in statuses:
         summary[status] = sum(1 for result in results if result.get("status") == status)
     return summary
+
+
+def _result_has_transport_failure(result: dict) -> bool:
+    if result.get("success"):
+        return False
+
+    def is_transport_reason(value) -> bool:
+        return isinstance(value, str) and value.startswith(("network_", "read_"))
+
+    for attempt in result.get("attempts") or []:
+        if isinstance(attempt, dict) and is_transport_reason(attempt.get("result")):
+            return True
+    institutional = result.get("institutional")
+    return bool(
+        isinstance(institutional, dict)
+        and is_transport_reason(institutional.get("error"))
+    )
 
 
 def main() -> int:
@@ -1464,6 +1489,9 @@ def main() -> int:
         print("Internal error: not every manifest row received a result.", file=sys.stderr)
         return 4
     final_results = [result for result in results if result is not None]
+    transport_error = transport_error or any(
+        _result_has_transport_failure(result) for result in final_results
+    )
     pending = [
         (record, final_results[record["input_index"]])
         for record in records
