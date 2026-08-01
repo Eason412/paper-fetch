@@ -1056,7 +1056,10 @@ def _result_has_transport_failure(result: dict) -> bool:
         return False
 
     def is_transport_reason(value) -> bool:
-        return isinstance(value, str) and value.startswith(("network_", "read_"))
+        return isinstance(value, str) and (
+            value == "landing_guard_error"
+            or value.startswith(("network_", "read_"))
+        )
 
     for attempt in result.get("attempts") or []:
         if isinstance(attempt, dict) and is_transport_reason(attempt.get("result")):

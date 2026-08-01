@@ -91,6 +91,11 @@ class CliContractTests(unittest.TestCase):
                 {"institutional": {"error": "read_OSError"}}
             )
         )
+        self.assertTrue(
+            oa_fetch._result_has_transport_failure(
+                {"institutional": {"error": "landing_guard_error"}}
+            )
+        )
         for reason in ("http_500", "not_pdf", "unsafe_redirect"):
             with self.subTest(reason=reason):
                 self.assertFalse(

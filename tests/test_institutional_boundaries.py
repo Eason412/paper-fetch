@@ -49,12 +49,15 @@ class FakeCDPSession:
         self.commands = []
         self.continued = []
         self.failed = []
+        self.fail_methods = set()
 
     def on(self, event, handler):
         self.handlers[event] = handler
 
     def send(self, method, params=None):
         self.commands.append((method, params))
+        if method in self.fail_methods:
+            raise RuntimeError(f"{method} failed")
         if method == "Page.getFrameTree":
             return {"frameTree": {"frame": {"id": self.MAIN_FRAME_ID}}}
         if method == "Fetch.continueRequest":
@@ -318,6 +321,18 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             [("malformed-request", "BlockedByClient")],
         )
 
+    def test_landing_guard_records_a_failed_block_command(self):
+        page = GuardablePage()
+        state = institutional_fetch._start_landing_guard(page)
+        session = page.context.session
+        session.fail_methods.add("Fetch.failRequest")
+
+        session.emit_request("unsafe-request", "http://127.0.0.1/private")
+
+        self.assertEqual(state["blocked"], ["http://127.0.0.1/private"])
+        self.assertEqual(state["error"], "landing_guard_error")
+        self.assertEqual(session.failed, [])
+
     def test_landing_page_closes_before_context_download(self):
         class Page:
             closed = False
@@ -373,8 +388,8 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             institutional_fetch,
             "_start_landing_guard",
             side_effect=RuntimeError("guard unavailable"),
-        ), self.assertRaisesRegex(RuntimeError, "guard unavailable"):
-            institutional_fetch._fetch_page_pdf(
+        ):
+            result, counts_as_block = institutional_fetch._fetch_page_pdf(
                 mock.Mock(),
                 page,
                 {},
@@ -386,6 +401,40 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             )
 
         page.close.assert_called_once_with()
+        self.assertTrue(counts_as_block)
+        self.assertEqual(result["error"], "landing_guard_error")
+
+    def test_landing_guard_command_error_takes_precedence_over_blocked_target(self):
+        page = mock.Mock()
+        with (
+            mock.patch.object(
+                institutional_fetch,
+                "_start_landing_guard",
+                return_value={
+                    "blocked": ["http://127.0.0.1/private"],
+                    "error": "landing_guard_error",
+                },
+            ),
+            mock.patch.object(
+                institutional_fetch,
+                "_inspect_landing_page",
+                side_effect=RuntimeError("request was closed"),
+            ),
+        ):
+            result, counts_as_block = institutional_fetch._fetch_page_pdf(
+                mock.Mock(),
+                page,
+                {},
+                {"meta": {}, "idx": 0},
+                "https://doi.org/10.1109/example",
+                Path("unused.pdf"),
+                "10.1109/example",
+                60,
+            )
+
+        page.close.assert_called_once_with()
+        self.assertTrue(counts_as_block)
+        self.assertEqual(result["error"], "landing_guard_error")
 
     def test_landing_login_wall_detection_requires_missing_citation_identity(self):
         page = mock.Mock()

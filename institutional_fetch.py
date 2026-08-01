@@ -539,6 +539,7 @@ def _fetch_page_pdf(
     guard_state = None
     inspection = None
     operation_error = None
+    close_failed = False
     try:
         guard_state = _start_landing_guard(page)
         inspection = _inspect_landing_page(
@@ -554,15 +555,17 @@ def _fetch_page_pdf(
     finally:
         try:
             page.close()
-        except Exception as exc:
-            if operation_error is None:
-                operation_error = (exc, exc.__traceback__)
+        except Exception:
+            close_failed = True
 
-    if guard_state and guard_state["blocked"]:
-        reason = "unsafe_landing_redirect"
-        return {**base, "success": False, "error": reason}, True
     if guard_state and guard_state["error"]:
         reason = guard_state["error"]
+        return {**base, "success": False, "error": reason}, True
+    if guard_state is None or close_failed:
+        reason = "landing_guard_error"
+        return {**base, "success": False, "error": reason}, True
+    if guard_state["blocked"]:
+        reason = "unsafe_landing_redirect"
         return {**base, "success": False, "error": reason}, True
     if operation_error is not None:
         exc, traceback = operation_error

@@ -301,7 +301,8 @@ a login refresh, or was deferred by the institutional cap.
 - `unsafe_landing_redirect`: stop that item; do not navigate to the rejected
   target manually or expand the landing allowlist.
 - `landing_guard_error`: keep the item failed; do not retry with the browser
-  guard disabled. Repair or update Playwright/Chromium first.
+  guard disabled. Repair or update Playwright/Chromium first; this is a
+  transport failure and the run exits `4`.
 - `unsafe_pdf_url`: stop that item; do not download the URL manually.
 - `landing_login_or_challenge`, `not_pdf_login_or_challenge`,
   `profile_missing_login_required`, or repeated landing/PDF HTTP 4xx/challenge
