@@ -41,15 +41,51 @@ class FakeContext:
         self.request = FakeRequest()
 
 
+class FakeCDPSession:
+    MAIN_FRAME_ID = "main-frame"
+
+    def __init__(self):
+        self.handlers = {}
+        self.commands = []
+        self.continued = []
+        self.failed = []
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    def send(self, method, params=None):
+        self.commands.append((method, params))
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": self.MAIN_FRAME_ID}}}
+        if method == "Fetch.continueRequest":
+            self.continued.append(params["requestId"])
+        if method == "Fetch.failRequest":
+            self.failed.append((params["requestId"], params["errorReason"]))
+        return None
+
+    def emit_request(self, request_id, url, *, frame_id=None, redirected_from=None):
+        params = {
+            "requestId": request_id,
+            "request": {"url": url},
+            "frameId": frame_id or self.MAIN_FRAME_ID,
+            "resourceType": "Document",
+        }
+        if redirected_from:
+            params["redirectedRequestId"] = redirected_from
+        self.handlers["Fetch.requestPaused"](params)
+
+class FakeCDPContext:
+    def new_cdp_session(self, page):
+        self.session = FakeCDPSession()
+        return self.session
+
+
 class GuardablePage:
-    main_frame = object()
-
-    def route(self, pattern, handler):
-        self.route_pattern = pattern
-        self.route_handler = handler
-
-    def unroute(self, pattern, handler):
-        self.unroute_call = (pattern, handler)
+    @property
+    def context(self):
+        if "_cdp_context" not in self.__dict__:
+            self._cdp_context = FakeCDPContext()
+        return self._cdp_context
 
 
 class InstitutionalBoundaryTests(unittest.TestCase):
@@ -118,23 +154,31 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         class Page(GuardablePage):
             url = "https://doi.org/10.1109/example"
 
-            def __init__(self):
-                self.redirect_route = None
-
             def goto(self, *args, **kwargs):
-                request = mock.Mock()
-                request.url = "http://127.0.0.1/private"
-                request.frame = self.main_frame
-                request.is_navigation_request.return_value = True
-                route = mock.Mock()
-                self.route_handler(route, request)
-                self.redirect_route = route
-                if route.abort.called:
-                    raise RuntimeError("redirect blocked")
-                self.url = request.url
+                hops = (
+                    ("request-1", self.url, None),
+                    (
+                        "request-2",
+                        "https://ieeexplore.ieee.org/document/123",
+                        "request-1",
+                    ),
+                    ("request-3", "http://127.0.0.1/private", "request-2"),
+                )
+                for request_id, request_url, redirected_from in hops:
+                    self.context.session.emit_request(
+                        request_id,
+                        request_url,
+                        redirected_from=redirected_from,
+                    )
+                    if any(
+                        failed_id == request_id
+                        for failed_id, _ in self.context.session.failed
+                    ):
+                        raise RuntimeError("redirect blocked")
+                self.url = hops[-1][1]
 
             def close(self):
-                return None
+                self.closed = True
 
         class PlaywrightManager:
             def __enter__(self):
@@ -168,9 +212,180 @@ class InstitutionalBoundaryTests(unittest.TestCase):
                     jitter=0,
                 )
 
-        page.redirect_route.abort.assert_called_once()
-        page.redirect_route.continue_.assert_not_called()
+        session = page.context.session
+        self.assertEqual(session.continued, ["request-1", "request-2"])
+        self.assertEqual(session.failed, [("request-3", "BlockedByClient")])
+        self.assertIn(
+            (
+                "Fetch.enable",
+                {
+                    "patterns": [
+                        {
+                            "urlPattern": "*",
+                            "resourceType": "Document",
+                            "requestStage": "Request",
+                        }
+                    ]
+                },
+            ),
+            session.commands,
+        )
+        self.assertTrue(page.closed)
         self.assertEqual(results[0]["error"], "unsafe_landing_redirect")
+
+    def test_landing_guard_stays_active_after_dom_content_loaded(self):
+        class Response:
+            status = 200
+
+        class Page(GuardablePage):
+            url = "https://doi.org/10.1109/example"
+
+            def goto(self, *args, **kwargs):
+                self.context.session.emit_request("request-1", self.url)
+                self.context.session.emit_request(
+                    "request-2",
+                    "https://ieeexplore.ieee.org/document/123",
+                    redirected_from="request-1",
+                )
+                self.url = "https://ieeexplore.ieee.org/document/123"
+                return Response()
+
+            def wait_for_timeout(self, milliseconds):
+                self.context.session.emit_request(
+                    "request-3",
+                    "http://127.0.0.1/private",
+                    redirected_from="request-2",
+                )
+
+            def get_attribute(self, selector, attribute, timeout):
+                values = {
+                    'meta[name="citation_title"]': "Expected Paper Title",
+                    'meta[name="citation_doi"]': "10.1109/example",
+                    'meta[name="citation_pdf_url"]': (
+                        "https://ieeexplore.ieee.org/document/123.pdf"
+                    ),
+                }
+                return values.get(selector)
+
+            def close(self):
+                self.closed = True
+
+        page = Page()
+        item = {
+            "idx": 0,
+            "doi": "10.1109/example",
+            "title": "Expected Paper Title",
+        }
+        with TemporaryDirectory() as tmp, mock.patch.object(
+            institutional_fetch, "_download"
+        ) as download:
+            result, counts_as_block = institutional_fetch._fetch_page_pdf(
+                mock.Mock(),
+                page,
+                item,
+                {"meta": item, "idx": 0},
+                "https://doi.org/10.1109/example",
+                Path(tmp) / "paper.pdf",
+                item["doi"],
+                60,
+            )
+
+        self.assertEqual(page.context.session.continued, ["request-1", "request-2"])
+        self.assertEqual(
+            page.context.session.failed,
+            [("request-3", "BlockedByClient")],
+        )
+        self.assertTrue(page.closed)
+        download.assert_not_called()
+        self.assertTrue(counts_as_block)
+        self.assertEqual(result["error"], "unsafe_landing_redirect")
+
+    def test_landing_guard_callback_fails_closed(self):
+        page = GuardablePage()
+        state = institutional_fetch._start_landing_guard(page)
+        session = page.context.session
+
+        session.handlers["Fetch.requestPaused"](
+            {
+                "requestId": "malformed-request",
+                "frameId": session.MAIN_FRAME_ID,
+            }
+        )
+
+        self.assertEqual(state["error"], "landing_guard_error")
+        self.assertEqual(
+            session.failed,
+            [("malformed-request", "BlockedByClient")],
+        )
+
+    def test_landing_page_closes_before_context_download(self):
+        class Page:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        page = Page()
+
+        def download_after_close(*args, **kwargs):
+            self.assertTrue(page.closed)
+            return True, "downloaded"
+
+        with (
+            TemporaryDirectory() as tmp,
+            mock.patch.object(
+                institutional_fetch,
+                "_start_landing_guard",
+                return_value={"blocked": [], "error": None},
+            ),
+            mock.patch.object(
+                institutional_fetch,
+                "_inspect_landing_page",
+                return_value=(
+                    {"meta": {}, "idx": 0},
+                    False,
+                    ("ieee", "https://ieeexplore.ieee.org/paper.pdf"),
+                ),
+            ),
+            mock.patch.object(
+                institutional_fetch,
+                "_download",
+                side_effect=download_after_close,
+            ),
+        ):
+            result, counts_as_block = institutional_fetch._fetch_page_pdf(
+                mock.Mock(),
+                page,
+                {},
+                {"meta": {}, "idx": 0},
+                "https://doi.org/10.1109/example",
+                Path(tmp) / "paper.pdf",
+                "10.1109/example",
+                60,
+            )
+
+        self.assertTrue(result["success"])
+        self.assertFalse(counts_as_block)
+
+    def test_landing_guard_setup_failure_still_closes_page(self):
+        page = mock.Mock()
+        with mock.patch.object(
+            institutional_fetch,
+            "_start_landing_guard",
+            side_effect=RuntimeError("guard unavailable"),
+        ), self.assertRaisesRegex(RuntimeError, "guard unavailable"):
+            institutional_fetch._fetch_page_pdf(
+                mock.Mock(),
+                page,
+                {},
+                {"meta": {}, "idx": 0},
+                "https://doi.org/10.1109/example",
+                Path("unused.pdf"),
+                "10.1109/example",
+                60,
+            )
+
+        page.close.assert_called_once_with()
 
     def test_landing_login_wall_detection_requires_missing_citation_identity(self):
         page = mock.Mock()

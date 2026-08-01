@@ -300,6 +300,8 @@ a login refresh, or was deferred by the institutional cap.
   result because an expected title could not be checked on the publisher page.
 - `unsafe_landing_redirect`: stop that item; do not navigate to the rejected
   target manually or expand the landing allowlist.
+- `landing_guard_error`: keep the item failed; do not retry with the browser
+  guard disabled. Repair or update Playwright/Chromium first.
 - `unsafe_pdf_url`: stop that item; do not download the URL manually.
 - `landing_login_or_challenge`, `not_pdf_login_or_challenge`,
   `profile_missing_login_required`, or repeated landing/PDF HTTP 4xx/challenge

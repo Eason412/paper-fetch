@@ -112,36 +112,59 @@ def _allowed_landing_url(url: str) -> bool:
     )
 
 
-def _guarded_landing_goto(page, url: str, timeout: int):
-    blocked_targets: list[str] = []
-    main_frame = page.main_frame
+def _start_landing_guard(page) -> dict:
+    state = {"blocked": [], "error": None}
+    session = page.context.new_cdp_session(page)
+    frame_tree = session.send("Page.getFrameTree")
+    main_frame_id = frame_tree["frameTree"]["frame"]["id"]
 
-    def guard_navigation(route, request):
-        if (
-            request.is_navigation_request()
-            and request.frame == main_frame
-            and not _allowed_landing_url(request.url)
-        ):
-            blocked_targets.append(request.url)
-            route.abort("blockedbyclient")
-            return
-        route.continue_()
-
-    page.route("**/*", guard_navigation)
-    try:
+    def guard_navigation(params):
+        request_id = params.get("requestId")
         try:
-            response = page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=timeout * 1000,
-            )
+            if not request_id:
+                raise ValueError("missing request id")
+            request_url = params["request"]["url"]
+            if (
+                params.get("frameId") == main_frame_id
+                and not _allowed_landing_url(request_url)
+            ):
+                state["blocked"].append(request_url)
+                method = "Fetch.failRequest"
+                payload = {
+                    "requestId": request_id,
+                    "errorReason": "BlockedByClient",
+                }
+            else:
+                method = "Fetch.continueRequest"
+                payload = {"requestId": request_id}
         except Exception:
-            if blocked_targets:
-                return None, "unsafe_landing_redirect"
-            raise
-        return response, None
-    finally:
-        page.unroute("**/*", guard_navigation)
+            state["error"] = "landing_guard_error"
+            if not request_id:
+                return
+            method = "Fetch.failRequest"
+            payload = {
+                "requestId": request_id,
+                "errorReason": "BlockedByClient",
+            }
+        try:
+            session.send(method, payload)
+        except Exception:
+            state["error"] = "landing_guard_error"
+
+    session.on("Fetch.requestPaused", guard_navigation)
+    session.send(
+        "Fetch.enable",
+        {
+            "patterns": [
+                {
+                    "urlPattern": "*",
+                    "resourceType": "Document",
+                    "requestStage": "Request",
+                }
+            ]
+        },
+    )
+    return state
 
 
 def _page_has_login_or_challenge(page) -> bool:
@@ -436,34 +459,36 @@ def _download(
     return True, "downloaded"
 
 
-def _fetch_page_pdf(
-    ctx,
+def _inspect_landing_page(
     page,
     item: dict,
     base: dict,
     landing: str,
-    dest: Path,
     doi: str | None,
     timeout: int,
-) -> tuple[dict, bool]:
-    response, landing_error = _guarded_landing_goto(page, landing, timeout)
-    if landing_error:
-        return (
-            {**base, "success": False, "error": landing_error},
-            _counts_as_block(landing_error),
-        )
+) -> tuple[dict, bool, tuple[str, str] | None]:
+    response = page.goto(
+        landing,
+        wait_until="domcontentloaded",
+        timeout=timeout * 1000,
+    )
 
     response_error = _response_error(response)
     if response_error:
         return (
             {**base, "success": False, "error": response_error},
             _counts_as_block(response_error),
+            None,
         )
 
     page.wait_for_timeout(1500)
     publisher = _publisher_from_url(page.url)
     if not publisher:
-        return {**base, "success": False, "error": "publisher_not_allowed"}, False
+        return (
+            {**base, "success": False, "error": "publisher_not_allowed"},
+            False,
+            None,
+        )
 
     page_base = {**base, "meta": _citation_metadata(page, item)}
     if (
@@ -471,7 +496,7 @@ def _fetch_page_pdf(
         and _page_has_login_or_challenge(page)
     ):
         reason = "landing_login_or_challenge"
-        return {**page_base, "success": False, "error": reason}, True
+        return {**page_base, "success": False, "error": reason}, True, None
 
     title_match = page_base["meta"].get("publisher_title_match")
     if page_base["meta"].get("expected_title") and title_match is not True:
@@ -480,7 +505,11 @@ def _fetch_page_pdf(
             if title_match is False
             else "publisher_title_unverifiable"
         )
-        return {**page_base, "success": False, "error": title_error}, False
+        return (
+            {**page_base, "success": False, "error": title_error},
+            False,
+            None,
+        )
 
     resolved_doi = page_base["meta"].get("doi") or doi
     pdf_url, pdf_error = _pdf_url_from_page(page, resolved_doi, publisher)
@@ -492,7 +521,58 @@ def _fetch_page_pdf(
                 "error": pdf_error or "no_pdf_link_found",
             },
             False,
+            None,
         )
+    return page_base, False, (publisher, pdf_url)
+
+
+def _fetch_page_pdf(
+    ctx,
+    page,
+    item: dict,
+    base: dict,
+    landing: str,
+    dest: Path,
+    doi: str | None,
+    timeout: int,
+) -> tuple[dict, bool]:
+    guard_state = None
+    inspection = None
+    operation_error = None
+    try:
+        guard_state = _start_landing_guard(page)
+        inspection = _inspect_landing_page(
+            page,
+            item,
+            base,
+            landing,
+            doi,
+            timeout,
+        )
+    except Exception as exc:
+        operation_error = (exc, exc.__traceback__)
+    finally:
+        try:
+            page.close()
+        except Exception as exc:
+            if operation_error is None:
+                operation_error = (exc, exc.__traceback__)
+
+    if guard_state and guard_state["blocked"]:
+        reason = "unsafe_landing_redirect"
+        return {**base, "success": False, "error": reason}, True
+    if guard_state and guard_state["error"]:
+        reason = guard_state["error"]
+        return {**base, "success": False, "error": reason}, True
+    if operation_error is not None:
+        exc, traceback = operation_error
+        raise exc.with_traceback(traceback)
+    if inspection is None:  # pragma: no cover - all paths assign or raise
+        raise RuntimeError("landing inspection produced no result")
+    page_base, counts_as_block, download_target = inspection
+    if download_target is None:
+        return page_base, counts_as_block
+    publisher, pdf_url = download_target
 
     ok, reason = _download(ctx, pdf_url, dest, timeout, publisher=publisher)
     if ok:
@@ -584,8 +664,6 @@ def fetch_batch(
                 except Exception as exc:
                     results.append({**base, "success": False,
                                     "error": f"{type(exc).__name__}"})
-                finally:
-                    page.close()
 
                 if consecutive_blocks >= 3:
                     print("[institutional] aborting: 3 blocks/login walls since the "
