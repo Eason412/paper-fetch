@@ -91,15 +91,17 @@ def safe_url(url: str) -> bool:
     return ip.is_global
 
 
+class UnsafeRedirectError(ValueError):
+    """Raised when a redirect crosses the public-URL safety boundary."""
+
+
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Apply the same public-URL policy to every HTTP redirect hop."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urllib.parse.urljoin(req.full_url, newurl)
         if not safe_url(target):
-            raise urllib.error.HTTPError(
-                target, code, "unsafe redirect target", headers, fp
-            )
+            raise UnsafeRedirectError(target)
         return super().redirect_request(req, fp, code, msg, headers, target)
 
 
@@ -610,6 +612,8 @@ def download_pdf(url: str, dest: Path, timeout: int, overwrite: bool) -> tuple[b
         opener = urllib.request.build_opener(SafeRedirectHandler())
         with opener.open(req, timeout=timeout) as response:
             data = response.read(MAX_PDF_BYTES + 1)
+    except UnsafeRedirectError:
+        return False, "unsafe_redirect"
     except urllib.error.HTTPError as exc:
         return False, f"http_{exc.code}"
     except Exception as exc:

@@ -496,6 +496,51 @@ class InstitutionalBoundaryTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(reason, "downloaded")
 
+    def test_download_distinguishes_login_pages_from_other_non_pdf_responses(self):
+        class Response:
+            status = 200
+            ok = True
+            url = "https://ieeexplore.ieee.org/stampPDF/final.pdf"
+            headers = {"content-type": "text/html"}
+
+            def __init__(self, body):
+                self._body = body
+
+            def body(self):
+                return self._body
+
+        class Request:
+            def __init__(self, body):
+                self.body = body
+
+            def get(self, url, timeout, max_redirects):
+                return Response(self.body)
+
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "paper.pdf"
+            generic_ctx = FakeContext()
+            generic_ctx.request = Request(b"<html><title>Server error</title></html>")
+            login_ctx = FakeContext()
+            login_ctx.request = Request(b"<html><form>Sign in to continue</form></html>")
+
+            generic = institutional_fetch._download(
+                generic_ctx,
+                "https://ieeexplore.ieee.org/stampPDF/final.pdf",
+                dest,
+                timeout=5,
+                publisher="ieee",
+            )
+            login = institutional_fetch._download(
+                login_ctx,
+                "https://ieeexplore.ieee.org/stampPDF/final.pdf",
+                dest,
+                timeout=5,
+                publisher="ieee",
+            )
+
+        self.assertEqual(generic, (False, "not_pdf"))
+        self.assertEqual(login, (False, "not_pdf_login_or_challenge"))
+
     def test_fetch_api_rejects_unsafe_throttle_values_before_playwright(self):
         invalid = (
             {"delay": 0},
@@ -618,14 +663,15 @@ class InstitutionalBoundaryTests(unittest.TestCase):
             ]
             pdf_results = [
                 ("https://ieeexplore.ieee.org/one.pdf", None),
-                (None, "no_pdf_link_found"),
+                ("https://ieeexplore.ieee.org/two.pdf", None),
                 ("https://ieeexplore.ieee.org/three.pdf", None),
                 ("https://ieeexplore.ieee.org/four.pdf", None),
             ]
             download_results = [
                 (False, "http_403"),
+                (False, "http_500"),
                 (False, "http_403"),
-                (False, "not_pdf_login_or_challenge"),
+                (False, "http_403"),
             ]
             with (
                 mock.patch.object(
@@ -656,7 +702,7 @@ class InstitutionalBoundaryTests(unittest.TestCase):
                 )
 
         self.assertEqual(len(results), 5)
-        self.assertEqual(download.call_count, 3)
+        self.assertEqual(download.call_count, 4)
         self.assertEqual(results[-1]["idx"], 4)
         self.assertEqual(results[-1]["error"], "aborted_after_repeated_blocks")
 

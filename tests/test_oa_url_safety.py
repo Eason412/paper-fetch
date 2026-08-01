@@ -87,7 +87,7 @@ class OaUrlSafetyTests(unittest.TestCase):
     def test_redirect_handler_rejects_unsafe_target(self):
         handler = oa_fetch.SafeRedirectHandler()
         request = urllib.request.Request("https://example.org/paper.pdf")
-        with self.assertRaises(urllib.error.HTTPError) as raised:
+        with self.assertRaises(oa_fetch.UnsafeRedirectError):
             handler.redirect_request(
                 request,
                 None,
@@ -96,9 +96,24 @@ class OaUrlSafetyTests(unittest.TestCase):
                 {},
                 "http://127.0.0.1/private.pdf",
             )
-        # The explicitly raised policy error has no response body to close.
-        if raised.exception.fp is not None:
-            raised.exception.fp.close()
+
+    def test_download_reports_unsafe_redirect_as_a_policy_failure(self):
+        class Opener:
+            def open(self, request, timeout):
+                raise oa_fetch.UnsafeRedirectError("http://127.0.0.1/private.pdf")
+
+        with TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "paper.pdf"
+            with mock.patch.object(urllib.request, "build_opener", return_value=Opener()):
+                ok, reason = oa_fetch.download_pdf(
+                    "https://example.org/paper.pdf",
+                    dest,
+                    timeout=5,
+                    overwrite=False,
+                )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "unsafe_redirect")
 
     def test_output_directory_error_returns_four(self):
         with TemporaryDirectory() as tmp:

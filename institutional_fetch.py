@@ -357,7 +357,19 @@ def _download(
     except Exception as exc:
         return False, f"read_{type(exc).__name__}"
     if not body.startswith(b"%PDF"):
-        return False, "not_pdf_login_or_challenge"
+        sample = body[:65536].lower()
+        login_or_challenge_markers = (
+            b"sign in",
+            b"log in",
+            b"login",
+            b"single sign-on",
+            b"captcha",
+            b"verify you are human",
+            b"access denied",
+        )
+        if any(marker in sample for marker in login_or_challenge_markers):
+            return False, "not_pdf_login_or_challenge"
+        return False, "not_pdf"
     if len(body) > MAX_PDF_BYTES:
         return False, "too_large"
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -464,8 +476,6 @@ def fetch_batch(
                                 else:
                                     if reason.startswith("http_4") or "challenge" in reason:
                                         consecutive_blocks += 1
-                                    else:
-                                        consecutive_blocks = 0
                                     results.append({**page_base, "success": False,
                                                     "pdf_url": pdf_url, "error": reason})
                 except Exception as exc:
